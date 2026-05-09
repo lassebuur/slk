@@ -1,6 +1,7 @@
 package debuglog
 
 import (
+	"bufio"
 	"os"
 	"path/filepath"
 	"strings"
@@ -165,5 +166,51 @@ func TestNextReqID_MonotonicUnique(t *testing.T) {
 	}
 	if len(seen) != G*M {
 		t.Fatalf("want %d unique ids, got %d", G*M, len(seen))
+	}
+}
+
+func TestConcurrentWrites_NoTornLines(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	t.Setenv("SLK_DEBUG", "1")
+	enabled.Store(false)
+
+	f, err := Init()
+	if err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	defer f.Close()
+
+	const G = 8
+	const M = 200
+	var wg sync.WaitGroup
+	for g := 0; g < G; g++ {
+		g := g
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < M; i++ {
+				Cache("g=%d i=%d", g, i)
+			}
+		}()
+	}
+	wg.Wait()
+
+	body, err := os.ReadFile(filepath.Join(dir, "slk-debug.log"))
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+
+	scanner := bufio.NewScanner(strings.NewReader(string(body)))
+	count := 0
+	for scanner.Scan() {
+		line := scanner.Text()
+		if !strings.Contains(line, "[cache] g=") {
+			t.Errorf("malformed line: %q", line)
+		}
+		count++
+	}
+	if count != G*M {
+		t.Errorf("want %d lines, got %d", G*M, count)
 	}
 }
