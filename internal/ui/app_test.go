@@ -2855,3 +2855,20 @@ func TestWorkspaceReadyFirstChannelSetsLoading(t *testing.T) {
 		t.Fatalf("expected messagepane loading=true on first-channel auto-select, got false")
 	}
 }
+
+func TestChannelSelectedInvokesVisitRecorder(t *testing.T) {
+	app := NewApp()
+	app.activeTeamID = "T1"
+
+	var recorded []string
+	app.SetChannelVisitRecorder(func(channelID string) {
+		recorded = append(recorded, channelID)
+	})
+
+	// Dispatch a ChannelSelectedMsg. The handler should call the recorder.
+	_, _ = app.Update(ChannelSelectedMsg{ID: "C1", Name: "general", Type: "channel"})
+
+	if len(recorded) != 1 || recorded[0] != "C1" {
+		t.Errorf("want recorded=[C1], got %v", recorded)
+	}
+}

@@ -559,6 +559,11 @@ type TypingSendFunc func(channelID string)
 // describing the result (typically ChannelJoinedMsg or ChannelJoinFailedMsg).
 type JoinChannelFunc func(channelID, channelName string) tea.Msg
 
+// ChannelVisitRecorder is invoked from case ChannelSelectedMsg to let
+// main.go persist the visit (SQLite write + in-memory map update on
+// the WorkspaceContext). Always called regardless of FromHistory.
+type ChannelVisitRecorder func(channelID string)
+
 // ChannelJoinedMsg is sent after the user successfully joins a channel from
 // the channel finder. The App responds by adding the channel to the sidebar
 // (so it appears in the user's regular channel list), marking it as joined in
@@ -704,6 +709,9 @@ type App struct {
 
 	// Permalink copying
 	permalinkFetchFn PermalinkFetchFunc
+
+	// Channel visit recording (persists SQLite + WorkspaceContext map)
+	channelVisitRecorder ChannelVisitRecorder
 
 	// Workspace switching
 	workspaceSwitcher SwitchWorkspaceFunc
@@ -1331,6 +1339,15 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.focusedPanel = PanelMessages
 		a.activeChannelID = msg.ID
 		a.lastTypingSent = time.Time{} // reset typing throttle for new channel
+		// Update local finder ordering immediately so the next Ctrl+T
+		// sees this channel at the top of the recents.
+		now := time.Now().Unix()
+		a.channelFinder.UpdateLastVisited(msg.ID, now)
+		// Persist the visit (SQLite write + WorkspaceContext map update)
+		// asynchronously via main.go's recorder closure.
+		if a.channelVisitRecorder != nil {
+			a.channelVisitRecorder(msg.ID)
+		}
 		// Tell the sidebar which channel is active so the staleness
 		// filter never hides it out from under the user.
 		a.sidebar.SetActiveChannelID(msg.ID)
@@ -3781,6 +3798,13 @@ func (a *App) SetThreadMarker(fn ThreadMarkFunc) {
 // the unread boundary sits when they open a thread. Optional.
 func (a *App) SetChannelLastReadFetcher(fn func(channelID string) string) {
 	a.channelLastReadFetcher = fn
+}
+
+// SetChannelVisitRecorder wires the callback that persists a channel
+// visit (SQLite write + WorkspaceContext map update). Called once per
+// ChannelSelectedMsg.
+func (a *App) SetChannelVisitRecorder(fn ChannelVisitRecorder) {
+	a.channelVisitRecorder = fn
 }
 
 // SetThreadReplySender sets the callback used to send thread replies.
