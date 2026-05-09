@@ -3016,3 +3016,132 @@ func TestNavStackFromHistoryDoesNotPush(t *testing.T) {
 		t.Errorf("cursor should be unchanged at 1, got %d", stack.cursor)
 	}
 }
+
+func TestNavigateBackEmitsChannelSelectedMsg(t *testing.T) {
+	app := NewApp()
+	app.activeTeamID = "T1"
+	app.SetChannelLookupFunc(func(channelID string) (string, string, bool) {
+		return channelID + "-name", "channel", true
+	})
+
+	_, _ = app.Update(ChannelSelectedMsg{ID: "C1", Name: "a", Type: "channel"})
+	_, _ = app.Update(ChannelSelectedMsg{ID: "C2", Name: "b", Type: "channel"})
+
+	cmd := app.navigateBack()
+	if cmd == nil {
+		t.Fatal("navigateBack returned nil cmd; expected ChannelSelectedMsg dispatch")
+	}
+	got := cmd()
+	cs, ok := got.(ChannelSelectedMsg)
+	if !ok {
+		t.Fatalf("want ChannelSelectedMsg, got %T", got)
+	}
+	if cs.ID != "C1" {
+		t.Errorf("want ID=C1, got %q", cs.ID)
+	}
+	if !cs.FromHistory {
+		t.Error("FromHistory must be true on synthesized navigation")
+	}
+	if app.navHistory["T1"].cursor != 0 {
+		t.Errorf("cursor: want 0, got %d", app.navHistory["T1"].cursor)
+	}
+}
+
+func TestNavigateForwardEmitsChannelSelectedMsg(t *testing.T) {
+	app := NewApp()
+	app.activeTeamID = "T1"
+	app.SetChannelLookupFunc(func(channelID string) (string, string, bool) {
+		return channelID + "-name", "channel", true
+	})
+
+	_, _ = app.Update(ChannelSelectedMsg{ID: "C1", Name: "a", Type: "channel"})
+	_, _ = app.Update(ChannelSelectedMsg{ID: "C2", Name: "b", Type: "channel"})
+	app.navHistory["T1"].cursor = 0 // simulate one back
+
+	cmd := app.navigateForward()
+	if cmd == nil {
+		t.Fatal("navigateForward returned nil cmd")
+	}
+	got := cmd()
+	cs, ok := got.(ChannelSelectedMsg)
+	if !ok {
+		t.Fatalf("want ChannelSelectedMsg, got %T", got)
+	}
+	if cs.ID != "C2" {
+		t.Errorf("want ID=C2, got %q", cs.ID)
+	}
+	if !cs.FromHistory {
+		t.Error("FromHistory must be true on synthesized navigation")
+	}
+	if app.navHistory["T1"].cursor != 1 {
+		t.Errorf("cursor: want 1, got %d", app.navHistory["T1"].cursor)
+	}
+}
+
+func TestNavigateBackAtStartIsNoop(t *testing.T) {
+	app := NewApp()
+	app.activeTeamID = "T1"
+	app.SetChannelLookupFunc(func(channelID string) (string, string, bool) {
+		return channelID, "channel", true
+	})
+
+	_, _ = app.Update(ChannelSelectedMsg{ID: "C1", Name: "a", Type: "channel"})
+
+	cmd := app.navigateBack()
+	if cmd != nil {
+		t.Errorf("expected nil at boundary, got non-nil cmd")
+	}
+}
+
+func TestNavigateForwardAtEndIsNoop(t *testing.T) {
+	app := NewApp()
+	app.activeTeamID = "T1"
+	app.SetChannelLookupFunc(func(channelID string) (string, string, bool) {
+		return channelID, "channel", true
+	})
+
+	_, _ = app.Update(ChannelSelectedMsg{ID: "C1", Name: "a", Type: "channel"})
+	_, _ = app.Update(ChannelSelectedMsg{ID: "C2", Name: "b", Type: "channel"})
+
+	cmd := app.navigateForward()
+	if cmd != nil {
+		t.Errorf("expected nil at end of stack, got non-nil cmd")
+	}
+}
+
+func TestNavigateBackSkipsStaleAndDropsThem(t *testing.T) {
+	app := NewApp()
+	app.activeTeamID = "T1"
+	// Lookup says "C2 is gone, others valid".
+	app.SetChannelLookupFunc(func(channelID string) (string, string, bool) {
+		if channelID == "C2" {
+			return "", "", false
+		}
+		return channelID, "channel", true
+	})
+
+	_, _ = app.Update(ChannelSelectedMsg{ID: "C1", Name: "a", Type: "channel"})
+	_, _ = app.Update(ChannelSelectedMsg{ID: "C2", Name: "b", Type: "channel"})
+	_, _ = app.Update(ChannelSelectedMsg{ID: "C3", Name: "c", Type: "channel"})
+
+	// Cursor at C3 (index 2). Back should skip C2 and land on C1.
+	cmd := app.navigateBack()
+	if cmd == nil {
+		t.Fatal("navigateBack returned nil cmd")
+	}
+	got := cmd()
+	cs, ok := got.(ChannelSelectedMsg)
+	if !ok {
+		t.Fatalf("want ChannelSelectedMsg, got %T", got)
+	}
+	if cs.ID != "C1" {
+		t.Errorf("want ID=C1 (skipping stale C2), got %q", cs.ID)
+	}
+	// C2 must have been dropped from entries.
+	stack := app.navHistory["T1"]
+	for _, id := range stack.entries {
+		if id == "C2" {
+			t.Errorf("stale C2 should have been dropped from entries; got %v", stack.entries)
+		}
+	}
+}

@@ -2313,6 +2313,106 @@ func (a *App) pushNavHistory(teamID, channelID string) {
 	}
 }
 
+// navigateBack walks the per-workspace history stack one step
+// backward, skipping any channel IDs that no longer resolve via
+// channelLookup (and dropping them from the stack). Returns a tea.Cmd
+// that synthesizes a ChannelSelectedMsg{FromHistory: true} for the
+// new target, or nil if there's no valid earlier entry.
+func (a *App) navigateBack() tea.Cmd {
+	return a.walkNav(-1)
+}
+
+// navigateForward is the symmetric opposite of navigateBack.
+func (a *App) navigateForward() tea.Cmd {
+	return a.walkNav(+1)
+}
+
+// walkNav implements the shared logic for navigateBack / navigateForward.
+// step must be -1 or +1.
+func (a *App) walkNav(step int) tea.Cmd {
+	stack, ok := a.navHistory[a.activeTeamID]
+	if !ok || stack.cursor < 0 {
+		return nil
+	}
+
+	// Walk in `step` direction looking for the first valid entry.
+	// As we go, accumulate stale indices to drop afterwards.
+	var stale []int
+	idx := stack.cursor + step
+	var (
+		foundID    string
+		foundName  string
+		foundType  string
+		foundIndex = -1
+	)
+	for idx >= 0 && idx < len(stack.entries) {
+		id := stack.entries[idx]
+		if a.channelLookup != nil {
+			name, ctype, valid := a.channelLookup(id)
+			if valid {
+				foundID, foundName, foundType, foundIndex = id, name, ctype, idx
+				break
+			}
+			stale = append(stale, idx)
+		} else {
+			// No lookup wired (tests/early init): treat all as valid.
+			foundID, foundName, foundType, foundIndex = id, id, "channel", idx
+			break
+		}
+		idx += step
+	}
+
+	if foundIndex < 0 {
+		// No valid target. Still drop the stale entries we discovered
+		// so the stack doesn't keep walking past them next time, and
+		// shift the cursor back to compensate for any drops below it.
+		droppedBeforeCursor := 0
+		for _, s := range stale {
+			if s < stack.cursor {
+				droppedBeforeCursor++
+			}
+		}
+		a.dropStaleStackEntries(stack, stale)
+		stack.cursor -= droppedBeforeCursor
+		return nil
+	}
+
+	// Compute foundIndex's new position after stale drops:
+	// every dropped index < foundIndex shifts foundIndex down by 1.
+	newFoundIndex := foundIndex
+	for _, s := range stale {
+		if s < foundIndex {
+			newFoundIndex--
+		}
+	}
+	a.dropStaleStackEntries(stack, stale)
+	stack.cursor = newFoundIndex
+
+	id, name, ctype := foundID, foundName, foundType
+	return func() tea.Msg {
+		return ChannelSelectedMsg{ID: id, Name: name, Type: ctype, FromHistory: true}
+	}
+}
+
+// dropStaleStackEntries returns a new entries slice with the indices
+// in stale removed. Order of indices in stale doesn't matter.
+func (a *App) dropStaleStackEntries(stack *navStack, stale []int) {
+	if len(stale) == 0 {
+		return
+	}
+	drop := make(map[int]struct{}, len(stale))
+	for _, s := range stale {
+		drop[s] = struct{}{}
+	}
+	out := make([]string, 0, len(stack.entries)-len(stale))
+	for i, e := range stack.entries {
+		if _, ok := drop[i]; !ok {
+			out = append(out, e)
+		}
+	}
+	stack.entries = out
+}
+
 func (a *App) handleNormalMode(msg tea.KeyMsg) tea.Cmd {
 	// Reaction-nav sub-state (intercept before normal keys)
 	if a.focusedPanel == PanelMessages && a.messagepane.ReactionNavActive() {
