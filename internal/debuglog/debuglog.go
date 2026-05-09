@@ -71,3 +71,48 @@ func Init() (*os.File, error) {
 func Enabled() bool {
 	return enabled.Load()
 }
+
+// Cache logs a message tagged [cache] for messages-cache and
+// reconciliation events. No-op when !Enabled().
+func Cache(format string, args ...any) {
+	if !enabled.Load() {
+		return
+	}
+	logger.Printf("[cache] "+format, args...)
+}
+
+// ImgFetch logs a message tagged [imgfetch] for image fetcher
+// lifecycle events. No-op when !Enabled().
+func ImgFetch(format string, args ...any) {
+	if !enabled.Load() {
+		return
+	}
+	logger.Printf("[imgfetch] "+format, args...)
+}
+
+// ImgRender logs a message tagged [imgrender] for image render-sizing
+// and protocol decisions. No-op when !Enabled().
+func ImgRender(format string, args ...any) {
+	if !enabled.Load() {
+		return
+	}
+	logger.Printf("[imgrender] "+format, args...)
+}
+
+// WS logs a message tagged [ws] for WebSocket events. No-op when
+// !Enabled().
+func WS(format string, args ...any) {
+	if !enabled.Load() {
+		return
+	}
+	logger.Printf("[ws] "+format, args...)
+}
+
+// General logs a message tagged [general] for miscellaneous events.
+// No-op when !Enabled().
+func General(format string, args ...any) {
+	if !enabled.Load() {
+		return
+	}
+	logger.Printf("[general] "+format, args...)
+}

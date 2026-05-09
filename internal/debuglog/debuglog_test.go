@@ -3,6 +3,7 @@ package debuglog
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -72,5 +73,63 @@ func TestInit_NoFileWhenDisabled(t *testing.T) {
 
 	if _, err := os.Stat(filepath.Join(dir, "slk-debug.log")); !os.IsNotExist(err) {
 		t.Fatalf("slk-debug.log should not exist when disabled, got err=%v", err)
+	}
+}
+
+func TestCategoryPrefixes(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	t.Setenv("SLK_DEBUG", "1")
+	enabled.Store(false)
+
+	f, err := Init()
+	if err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	defer f.Close()
+
+	Cache("cache-line %d", 1)
+	ImgFetch("imgfetch-line %d", 2)
+	ImgRender("imgrender-line %d", 3)
+	WS("ws-line %d", 4)
+	General("general-line %d", 5)
+
+	body, err := os.ReadFile(filepath.Join(dir, "slk-debug.log"))
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	out := string(body)
+	for _, want := range []string{
+		"[cache] cache-line 1",
+		"[imgfetch] imgfetch-line 2",
+		"[imgrender] imgrender-line 3",
+		"[ws] ws-line 4",
+		"[general] general-line 5",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("log missing %q\nfull output:\n%s", want, out)
+		}
+	}
+}
+
+func TestEnabled_FastPathNoOp(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	t.Setenv("SLK_DEBUG", "")
+	enabled.Store(false)
+
+	if _, err := Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+
+	// Should not panic and should not create a file.
+	Cache("nope %d", 1)
+	ImgFetch("nope %d", 2)
+	ImgRender("nope %d", 3)
+	WS("nope %d", 4)
+	General("nope %d", 5)
+
+	if _, err := os.Stat(filepath.Join(dir, "slk-debug.log")); !os.IsNotExist(err) {
+		t.Fatalf("slk-debug.log should not exist; err=%v", err)
 	}
 }
