@@ -181,9 +181,18 @@ func (m *Model) filter() {
 	q := strings.ToLower(m.query)
 
 	if q == "" {
+		idxs := make([]int, len(m.items))
 		for i := range m.items {
-			m.filtered = append(m.filtered, i)
+			idxs[i] = i
 		}
+		// Insertion sort by (LastVisited DESC, typeRank ASC, name ASC).
+		// Insertion sort is stable and the n is small (channel lists).
+		for i := 1; i < len(idxs); i++ {
+			for j := i; j > 0 && m.lessForEmptyQuery(idxs[j], idxs[j-1]); j-- {
+				idxs[j-1], idxs[j] = idxs[j], idxs[j-1]
+			}
+		}
+		m.filtered = idxs
 		return
 	}
 
@@ -316,6 +325,21 @@ func isSeparator(r rune) bool {
 		return true
 	}
 	return false
+}
+
+// lessForEmptyQuery reports whether item a should sort before item b
+// in the empty-query view. Sort key: LastVisited DESC, typeRank ASC,
+// Name ASC (case-insensitive).
+func (m *Model) lessForEmptyQuery(ai, bi int) bool {
+	a, b := m.items[ai], m.items[bi]
+	if a.LastVisited != b.LastVisited {
+		return a.LastVisited > b.LastVisited
+	}
+	ar, br := m.typeRank(ai), m.typeRank(bi)
+	if ar != br {
+		return ar < br
+	}
+	return strings.ToLower(a.Name) < strings.ToLower(b.Name)
 }
 
 // View renders just the overlay box.

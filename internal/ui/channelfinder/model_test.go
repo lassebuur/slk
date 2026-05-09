@@ -6,13 +6,17 @@ import (
 )
 
 func testItems() []Item {
+	// Descending LastVisited values keep these items in their declared
+	// order under the empty-query sort (LastVisited DESC, typeRank ASC,
+	// Name ASC). Several legacy tests below exercise selection /
+	// navigation mechanics and assume this declared order.
 	return []Item{
-		{ID: "C1", Name: "marketing", Type: "channel"},
-		{ID: "C2", Name: "engineering", Type: "channel"},
-		{ID: "C3", Name: "ext-automote", Type: "channel"},
-		{ID: "C4", Name: "grant-planning", Type: "private"},
-		{ID: "D1", Name: "Alice", Type: "dm", Presence: "active"},
-		{ID: "D2", Name: "Bob", Type: "dm", Presence: "away"},
+		{ID: "C1", Name: "marketing", Type: "channel", LastVisited: 600},
+		{ID: "C2", Name: "engineering", Type: "channel", LastVisited: 500},
+		{ID: "C3", Name: "ext-automote", Type: "channel", LastVisited: 400},
+		{ID: "C4", Name: "grant-planning", Type: "private", LastVisited: 300},
+		{ID: "D1", Name: "Alice", Type: "dm", Presence: "active", LastVisited: 200},
+		{ID: "D2", Name: "Bob", Type: "dm", Presence: "away", LastVisited: 100},
 	}
 }
 
@@ -285,9 +289,11 @@ func TestSetBrowseableReplacesPreviousBrowseable(t *testing.T) {
 
 func TestEnterReturnsJoinedFlag(t *testing.T) {
 	m := New()
+	// LastVisited values pin the order: C1 (joined) appears first, C2
+	// (browseable) second under the empty-query sort.
 	m.SetItems([]Item{
-		{ID: "C1", Name: "general", Type: "channel", Joined: true},
-		{ID: "C2", Name: "browseable", Type: "channel", Joined: false},
+		{ID: "C1", Name: "general", Type: "channel", Joined: true, LastVisited: 200},
+		{ID: "C2", Name: "browseable", Type: "channel", Joined: false, LastVisited: 100},
 	})
 	m.Open()
 
@@ -404,6 +410,60 @@ func TestFilterSubsequenceWordBoundaryRanking(t *testing.T) {
 	if m.items[m.filtered[0]].Name != "alpha-beta" {
 		t.Errorf("expected 'alpha-beta' to outrank 'xxabxx-yyy', got %q first",
 			m.items[m.filtered[0]].Name)
+	}
+}
+
+func TestFilterEmptyOrdersByRecency(t *testing.T) {
+	m := New()
+	m.SetItems([]Item{
+		{ID: "C1", Name: "alpha", Type: "channel", LastVisited: 100},
+		{ID: "C2", Name: "bravo", Type: "channel", LastVisited: 300},
+		{ID: "C3", Name: "charlie", Type: "channel", LastVisited: 200},
+		{ID: "C4", Name: "delta", Type: "channel", LastVisited: 0}, // never visited
+		{ID: "C5", Name: "echo", Type: "channel", LastVisited: 0},  // never visited
+	})
+	m.Open()
+
+	if len(m.filtered) != 5 {
+		t.Fatalf("want 5 filtered, got %d", len(m.filtered))
+	}
+	gotOrder := []string{}
+	for _, idx := range m.filtered {
+		gotOrder = append(gotOrder, m.items[idx].Name)
+	}
+	// Visited (DESC by ts): bravo(300), charlie(200), alpha(100).
+	// Never visited (typeRank+name): delta, echo.
+	want := []string{"bravo", "charlie", "alpha", "delta", "echo"}
+	for i := range want {
+		if gotOrder[i] != want[i] {
+			t.Errorf("position %d: want %q, got %q (full: %v)", i, want[i], gotOrder[i], gotOrder)
+		}
+	}
+}
+
+func TestFilterEmptyNeverVisitedFallsBackToTypeRank(t *testing.T) {
+	m := New()
+	m.SetItems([]Item{
+		// All never visited; must come out in DM, channel, group_dm order.
+		{ID: "C1", Name: "zulu", Type: "channel", LastVisited: 0},
+		{ID: "G1", Name: "alpha-group", Type: "group_dm", LastVisited: 0},
+		{ID: "D1", Name: "yankee", Type: "dm", LastVisited: 0},
+	})
+	m.Open()
+
+	if len(m.filtered) != 3 {
+		t.Fatalf("want 3 filtered, got %d", len(m.filtered))
+	}
+	gotOrder := []string{}
+	for _, idx := range m.filtered {
+		gotOrder = append(gotOrder, m.items[idx].Name)
+	}
+	// typeRank: dm(0), channel(1), group_dm(2).
+	want := []string{"yankee", "zulu", "alpha-group"}
+	for i := range want {
+		if gotOrder[i] != want[i] {
+			t.Errorf("position %d: want %q, got %q (full: %v)", i, want[i], gotOrder[i], gotOrder)
+		}
 	}
 }
 
