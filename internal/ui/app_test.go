@@ -3145,3 +3145,52 @@ func TestNavigateBackSkipsStaleAndDropsThem(t *testing.T) {
 		}
 	}
 }
+
+func TestCtrlHTriggersNavBack(t *testing.T) {
+	app := NewApp()
+	app.activeTeamID = "T1"
+	app.SetChannelLookupFunc(func(channelID string) (string, string, bool) {
+		return channelID, "channel", true
+	})
+
+	_, _ = app.Update(ChannelSelectedMsg{ID: "C1", Name: "a", Type: "channel"})
+	_, _ = app.Update(ChannelSelectedMsg{ID: "C2", Name: "b", Type: "channel"})
+
+	cmd := app.handleNormalMode(tea.KeyPressMsg{Code: 'h', Mod: tea.ModCtrl})
+	if cmd == nil {
+		t.Fatal("expected cmd from ctrl+h dispatch")
+	}
+	got := cmd()
+	cs, ok := got.(ChannelSelectedMsg)
+	if !ok {
+		t.Fatalf("want ChannelSelectedMsg, got %T", got)
+	}
+	if cs.ID != "C1" || !cs.FromHistory {
+		t.Errorf("want ID=C1 FromHistory=true, got %+v", cs)
+	}
+}
+
+func TestCtrlKTriggersNavForward(t *testing.T) {
+	app := NewApp()
+	app.activeTeamID = "T1"
+	app.SetChannelLookupFunc(func(channelID string) (string, string, bool) {
+		return channelID, "channel", true
+	})
+
+	_, _ = app.Update(ChannelSelectedMsg{ID: "C1", Name: "a", Type: "channel"})
+	_, _ = app.Update(ChannelSelectedMsg{ID: "C2", Name: "b", Type: "channel"})
+	app.navHistory["T1"].cursor = 0
+
+	cmd := app.handleNormalMode(tea.KeyPressMsg{Code: 'k', Mod: tea.ModCtrl})
+	if cmd == nil {
+		t.Fatal("expected cmd from ctrl+k dispatch")
+	}
+	got := cmd()
+	cs, ok := got.(ChannelSelectedMsg)
+	if !ok {
+		t.Fatalf("want ChannelSelectedMsg, got %T", got)
+	}
+	if cs.ID != "C2" || !cs.FromHistory {
+		t.Errorf("want ID=C2 FromHistory=true, got %+v", cs)
+	}
+}

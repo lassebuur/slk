@@ -2456,6 +2456,16 @@ func (a *App) handleNormalMode(msg tea.KeyMsg) tea.Cmd {
 	case key.Matches(msg, a.keys.ToggleThread):
 		a.ToggleThread()
 
+	case key.Matches(msg, a.keys.NavBack):
+		if cmd := a.navigateBack(); cmd != nil {
+			return cmd
+		}
+
+	case key.Matches(msg, a.keys.NavForward):
+		if cmd := a.navigateForward(); cmd != nil {
+			return cmd
+		}
+
 	case key.Matches(msg, a.keys.Down):
 		if cmd := a.handleDown(); cmd != nil {
 			return cmd
