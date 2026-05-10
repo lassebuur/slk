@@ -8,7 +8,6 @@ import (
 	_ "image/jpeg"
 	_ "image/png"
 	"io"
-	"log"
 	"net/http"
 	"net/url"
 	"os"
@@ -18,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gammons/slk/internal/debuglog"
 	"golang.org/x/image/draw"
 	"golang.org/x/sync/singleflight"
 )
@@ -342,14 +342,14 @@ func (f *Fetcher) download(ctx context.Context, url string) (body []byte, conten
 			if teamID != "" {
 				if _, known := f.authsByTeam[teamID]; !known && auth.TeamID != "" {
 					f.learnedAuths.Store(teamID, auth)
-					log.Printf("file auth: learned team %q is reachable via team %q's auth", teamID, auth.TeamID)
+					debuglog.ImgFetch("file auth: learned team %q is reachable via team %q's auth", teamID, auth.TeamID)
 				}
 			}
 			return body, ct, nil
 		}
 		// Auth failure (HTML response or 401/403) — try next auth.
 		lastErr = fmt.Errorf("fetch %s: HTTP %d ct=%q (auth failure?)", url, status, ct)
-		log.Printf("file auth: attempt with team %q failed for %s (status=%d ct=%q); trying next",
+		debuglog.ImgFetch("file auth: attempt with team %q failed for %s (status=%d ct=%q); trying next",
 			auth.TeamID, url, status, ct)
 	}
 	if lastErr == nil {
@@ -400,7 +400,7 @@ func (f *Fetcher) tryDownloadWithBackoff(ctx context.Context, url string, auth T
 		if attempt == rateLimitMaxRetries {
 			return body, ct, status, fmt.Errorf("fetch %s: HTTP 429 after %d retries", url, attempt+1)
 		}
-		log.Printf("file auth: HTTP 429 for %s (attempt %d/%d); backing off %s",
+		debuglog.ImgFetch("file auth: HTTP 429 for %s (attempt %d/%d); backing off %s",
 			url, attempt+1, rateLimitMaxRetries+1, backoff)
 		select {
 		case <-ctx.Done():
