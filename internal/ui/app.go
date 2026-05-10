@@ -22,6 +22,7 @@ import (
 	"golang.design/x/clipboard"
 	"github.com/gammons/slk/internal/cache"
 	"github.com/gammons/slk/internal/config"
+	"github.com/gammons/slk/internal/debuglog"
 	"github.com/gammons/slk/internal/emoji"
 	imgpkg "github.com/gammons/slk/internal/image"
 	"github.com/gammons/slk/internal/ui/channelfinder"
@@ -1346,6 +1347,8 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if a.channelCacheReader != nil {
 			cached = a.channelCacheReader(msg.ID)
 		}
+		debuglog.Cache("ChannelSelectedMsg: channel=%s name=%q cache_hit_count=%d",
+			msg.ID, msg.Name, len(cached))
 		if len(cached) > 0 {
 			a.messagepane.SetLoading(false)
 			a.messagepane.SetMessages(cached)
@@ -1364,12 +1367,30 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if a.channelFetcher != nil {
 			fetcher := a.channelFetcher
 			chID, chName := msg.ID, msg.Name
+			debuglog.Cache("ChannelSelectedMsg: channel=%s firing background network fetch", msg.ID)
 			cmds = append(cmds, func() tea.Msg {
 				return fetcher(chID, chName)
 			})
+		} else {
+			debuglog.Cache("ChannelSelectedMsg: channel=%s no channelFetcher wired", msg.ID)
 		}
 
 	case MessagesLoadedMsg:
+		// Distinguish the three cases of the fetcher's nil-vs-[] contract:
+		//   nil      → network failure, keep cached render
+		//   []       → channel is genuinely empty, replace with empty
+		//   non-empty → authoritative replace
+		var kind string
+		switch {
+		case msg.Messages == nil:
+			kind = "nil_keep_cache"
+		case len(msg.Messages) == 0:
+			kind = "empty_replace"
+		default:
+			kind = "full_replace"
+		}
+		debuglog.Cache("MessagesLoadedMsg: channel=%s active=%s kind=%s count=%d",
+			msg.ChannelID, a.activeChannelID, kind, len(msg.Messages))
 		if msg.ChannelID == a.activeChannelID {
 			a.messagepane.SetLoading(false)
 			a.messagepane.SetLastReadTS(msg.LastReadTS)
@@ -1384,6 +1405,8 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case OlderMessagesLoadedMsg:
+		debuglog.Cache("OlderMessagesLoadedMsg: channel=%s active=%s count=%d",
+			msg.ChannelID, a.activeChannelID, len(msg.Messages))
 		if msg.ChannelID == a.activeChannelID {
 			a.fetchingOlder = false
 			a.messagepane.SetLoading(false)
