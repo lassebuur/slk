@@ -148,6 +148,14 @@ type WorkspaceContext struct {
 	// updated on every ChannelSelectedMsg via the visit recorder.
 	// Used to populate channelfinder.Item.LastVisited for sort.
 	LastVisitedByChannel map[string]int64
+	// UserResolver dispatches background users.info lookups for
+	// unknown message authors. Set in connectWorkspace once the
+	// in-memory UserNames map and the *tea.Program are both available.
+	// Hot-path message processors call resolveUserCached first and
+	// fall back to UserResolver.Request(userID) to enqueue an async
+	// fetch; the goroutine emits ui.UserResolvedMsg back into the
+	// program, which patches in-history rows live.
+	UserResolver *userResolver
 }
 
 // workspaceRouter holds the program-wide "active workspace" pointer.
@@ -172,6 +180,87 @@ func (r *workspaceRouter) Active() *WorkspaceContext  { return r.active.Load() }
 func (r *workspaceRouter) Set(wctx *WorkspaceContext) { r.active.Store(wctx) }
 func (r *workspaceRouter) ByID(teamID string) *WorkspaceContext {
 	return r.all[teamID]
+}
+
+// userResolver dispatches users.info lookups for unknown message
+// authors in the background. Deduplicates concurrent requests for
+// the same userID; failures are silent (the row stays rendered as
+// its user ID). Bound to a single workspace because user IDs are
+// workspace-scoped.
+type userResolver struct {
+	teamID    string
+	client    *slackclient.Client
+	db        *cache.DB
+	avatars   *avatar.Cache
+	userNames map[string]string
+	send      func(tea.Msg)
+	inflight  sync.Map // userID -> struct{}
+}
+
+func newUserResolver(
+	teamID string,
+	client *slackclient.Client,
+	db *cache.DB,
+	avatars *avatar.Cache,
+	userNames map[string]string,
+	send func(tea.Msg),
+) *userResolver {
+	return &userResolver{
+		teamID:    teamID,
+		client:    client,
+		db:        db,
+		avatars:   avatars,
+		userNames: userNames,
+		send:      send,
+	}
+}
+
+// Request enqueues a users.info fetch for userID. Returns immediately.
+// On success, emits a ui.UserResolvedMsg via the resolver's send
+// callback so the App can patch in-history display names live.
+func (r *userResolver) Request(userID string) {
+	if r == nil || userID == "" {
+		return
+	}
+	if _, exists := r.inflight.LoadOrStore(userID, struct{}{}); exists {
+		return
+	}
+	go func() {
+		defer r.inflight.Delete(userID)
+		u, err := r.client.GetUserProfile(userID)
+		if err != nil {
+			debuglog.Cache("userResolver: GetUserProfile team=%s user=%s err=%v",
+				r.teamID, userID, err)
+			return
+		}
+		name := u.Profile.DisplayName
+		if name == "" {
+			name = u.RealName
+		}
+		if name == "" {
+			name = u.Name
+		}
+		isBot := u.IsBot || u.IsAppUser
+		r.userNames[userID] = name
+		r.avatars.Preload(userID, u.Profile.Image32)
+		_ = r.db.UpsertUser(cache.User{
+			ID:          userID,
+			WorkspaceID: r.teamID,
+			Name:        u.Name,
+			DisplayName: name,
+			AvatarURL:   u.Profile.Image32,
+			Presence:    "away",
+			IsBot:       isBot,
+		})
+		if r.send != nil {
+			r.send(ui.UserResolvedMsg{
+				TeamID:      r.teamID,
+				UserID:      userID,
+				DisplayName: name,
+				IsBot:       isBot,
+			})
+		}
+	}()
 }
 
 func main() {
@@ -1101,7 +1190,7 @@ func run() error {
 	// Results are sent to the TUI via p.Send()
 	for _, ot := range orderedTokens {
 		go func(tok slackclient.Token) {
-			wctx, err := connectWorkspace(ctx, tok, db, cfg, avatarCache)
+			wctx, err := connectWorkspace(ctx, tok, db, cfg, avatarCache, p)
 			if err != nil {
 				p.Send(ui.WorkspaceFailedMsg{TeamName: tok.TeamName})
 				return
@@ -1229,7 +1318,7 @@ func run() error {
 	return err
 }
 
-func connectWorkspace(ctx context.Context, token slackclient.Token, db *cache.DB, cfg config.Config, avatarCache *avatar.Cache) (*WorkspaceContext, error) {
+func connectWorkspace(ctx context.Context, token slackclient.Token, db *cache.DB, cfg config.Config, avatarCache *avatar.Cache, p *tea.Program) (*WorkspaceContext, error) {
 	client := slackclient.NewClient(token.AccessToken, token.Cookie)
 	if err := client.Connect(ctx); err != nil {
 		return nil, fmt.Errorf("connecting %s: %w", token.TeamName, err)
@@ -1265,6 +1354,24 @@ func connectWorkspace(ctx context.Context, token slackclient.Token, db *cache.DB
 			wctx.BotUserIDs[u.ID] = true
 		}
 	}
+
+	// Construct the per-workspace async user resolver. wctx.UserNames
+	// is already initialized (and seeded) above; the resolver shares
+	// that map by reference so subsequent Lookup hits populate it
+	// for future cache-only reads. p may be nil in tests, in which
+	// case the resolver's send callback is a no-op.
+	wctx.UserResolver = newUserResolver(
+		wctx.TeamID,
+		wctx.Client,
+		db,
+		avatarCache,
+		wctx.UserNames,
+		func(msg tea.Msg) {
+			if p != nil {
+				p.Send(msg)
+			}
+		},
+	)
 
 	// Seed last-visited timestamps for the channel finder's recency
 	// sort. Best-effort: failure is logged and the map stays empty,
