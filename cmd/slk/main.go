@@ -412,19 +412,19 @@ func run() error {
 	if proto == imgpkg.ProtoKitty && term.IsTerminal(int(os.Stdin.Fd())) {
 		state, err := term.MakeRaw(int(os.Stdin.Fd()))
 		if err != nil {
-			log.Printf("kitty probe skipped: cannot enter raw mode: %v", err)
+			debuglog.ImgRender("kitty probe skipped: cannot enter raw mode: %v", err)
 		} else {
 			ok := imgpkg.ProbeKittyGraphics(os.Stdout, os.Stdin, 200*time.Millisecond)
 			if rerr := term.Restore(int(os.Stdin.Fd()), state); rerr != nil {
-				log.Printf("term restore after kitty probe: %v", rerr)
+				debuglog.ImgRender("term restore after kitty probe: %v", rerr)
 			}
 			if !ok {
-				log.Println("kitty probe failed, downgrading to halfblock")
+				debuglog.ImgRender("kitty probe failed, downgrading to halfblock")
 				proto = imgpkg.ProtoHalfBlock
 			}
 		}
 	}
-	log.Printf("image protocol: %s", proto)
+	debuglog.ImgRender("image protocol: %s", proto)
 
 	// Avatars use kitty graphics when available (sharper). Sixel and
 	// half-block terminals fall back to half-block — re-emitting sixel
@@ -433,7 +433,7 @@ func run() error {
 
 	// Cell pixel metrics for sizing decisions.
 	pxW, pxH := imgpkg.CellPixels(int(os.Stdout.Fd()))
-	log.Printf("cell pixels: %dx%d", pxW, pxH)
+	debuglog.ImgRender("cell pixels: %dx%d", pxW, pxH)
 
 	// Wire the inline-image pipeline into the messages pane. SendMsg
 	// stays nil here because tea.NewProgram has not run yet; we re-call
@@ -1522,7 +1522,7 @@ func loadCachedMessages(
 	}
 	rows, err := db.GetMessages(channelID, 50, "")
 	if err != nil {
-		log.Printf("loadCachedMessages: GetMessages %s: %v", channelID, err)
+		debuglog.Cache("loadCachedMessages: GetMessages %s: %v", channelID, err)
 		return nil
 	}
 	if len(rows) == 0 {
@@ -1602,7 +1602,7 @@ func enrichCachedRow(
 			})
 		}
 	} else {
-		log.Printf("%s: GetReactions %s/%s: %v", logPrefix, channelID, m.TS, err)
+		debuglog.Cache("%s: GetReactions %s/%s: %v", logPrefix, channelID, m.TS, err)
 	}
 
 	// Attachments / blocks / legacy attachments come from
@@ -1614,7 +1614,7 @@ func enrichCachedRow(
 	if m.RawJSON != "" {
 		var raw slack.Message
 		if err := json.Unmarshal([]byte(m.RawJSON), &raw); err != nil {
-			log.Printf("%s: raw_json unmarshal for %s/%s: %v",
+			debuglog.Cache("%s: raw_json unmarshal for %s/%s: %v",
 				logPrefix, channelID, m.TS, err)
 		} else {
 			attachments = extractAttachments(raw.Files)
@@ -1662,7 +1662,7 @@ func loadCachedThreadReplies(
 	}
 	rows, err := db.GetThreadReplies(channelID, threadTS)
 	if err != nil {
-		log.Printf("loadCachedThreadReplies: GetThreadReplies %s/%s: %v", channelID, threadTS, err)
+		debuglog.Cache("loadCachedThreadReplies: GetThreadReplies %s/%s: %v", channelID, threadTS, err)
 		return nil
 	}
 	if len(rows) == 0 {
@@ -1690,7 +1690,7 @@ func fetchChannelMessages(client *slackclient.Client, channelID string, db *cach
 	ctx := context.Background()
 	history, err := client.GetHistory(ctx, channelID, 50, "")
 	if err != nil {
-		log.Printf("fetchChannelMessages: GetHistory %s: %v", channelID, err)
+		debuglog.Cache("fetchChannelMessages: GetHistory %s: %v", channelID, err)
 		return nil
 	}
 
@@ -1763,7 +1763,7 @@ func fetchThreadReplies(client *slackclient.Client, channelID, threadTS string, 
 	ctx := context.Background()
 	history, err := client.GetReplies(ctx, channelID, threadTS)
 	if err != nil {
-		log.Printf("fetchThreadReplies: GetReplies %s/%s: %v", channelID, threadTS, err)
+		debuglog.Cache("fetchThreadReplies: GetReplies %s/%s: %v", channelID, threadTS, err)
 		return nil
 	}
 
