@@ -2567,7 +2567,14 @@ func (h *rtmEventHandler) refreshMutedForActive() {
 	}
 	store := h.wsCtx.MuteStore
 	for i := range h.wsCtx.Channels {
-		h.wsCtx.Channels[i].IsMuted = store.IsMuted(h.wsCtx.Channels[i].ID)
+		chID := h.wsCtx.Channels[i].ID
+		before := h.wsCtx.Channels[i].IsMuted
+		after := store.IsMuted(chID)
+		if before != after {
+			debuglog.Cache("refreshMutedForActive: channel=%s name=%q muted_before=%v muted_after=%v",
+				chID, h.wsCtx.Channels[i].Name, before, after)
+		}
+		h.wsCtx.Channels[i].IsMuted = after
 	}
 	if h.program == nil {
 		return
