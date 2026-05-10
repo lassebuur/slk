@@ -470,6 +470,8 @@ func (f *Fetcher) tryDownload(ctx context.Context, url string, auth TeamAuth) ([
 		url, auth.TeamID, auth.Token != "")
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
+		debuglog.ImgFetch("http-result: url=%s dur_ms=%d newrequest_err=%v",
+			url, time.Since(httpStart).Milliseconds(), err)
 		return nil, "", 0, err
 	}
 	httpReq.Header.Set("User-Agent", "slk/inline-image-fetcher")
