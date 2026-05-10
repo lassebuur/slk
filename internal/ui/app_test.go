@@ -3250,3 +3250,44 @@ func TestWorkspaceReady_BootstrapClaimIsOneShot(t *testing.T) {
 		t.Errorf("activeTeamID changed after second InitialActive; got %q, want %q", app.activeTeamID, first)
 	}
 }
+
+func TestUserResolvedMsg_PatchesActiveWorkspace(t *testing.T) {
+	app := NewApp()
+	app.activeTeamID = "T1"
+	app.messagepane.SetMessages([]messages.MessageItem{
+		{TS: "1.0", UserID: "U1", UserName: "U1", Text: "hi"},
+	})
+
+	app.Update(UserResolvedMsg{
+		TeamID:      "T1",
+		UserID:      "U1",
+		DisplayName: "alice",
+	})
+
+	got := app.messagepane.Messages()
+	if len(got) != 1 {
+		t.Fatalf("expected 1 message, got %d", len(got))
+	}
+	if got[0].UserName != "alice" {
+		t.Errorf("UserName = %q, want alice", got[0].UserName)
+	}
+}
+
+func TestUserResolvedMsg_DropsForOtherWorkspace(t *testing.T) {
+	app := NewApp()
+	app.activeTeamID = "T1"
+	app.messagepane.SetMessages([]messages.MessageItem{
+		{TS: "1.0", UserID: "U1", UserName: "U1", Text: "hi"},
+	})
+
+	app.Update(UserResolvedMsg{
+		TeamID:      "T-other",
+		UserID:      "U1",
+		DisplayName: "alice",
+	})
+
+	got := app.messagepane.Messages()
+	if got[0].UserName != "U1" {
+		t.Errorf("UserName changed despite wrong team; got %q", got[0].UserName)
+	}
+}

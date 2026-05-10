@@ -193,6 +193,17 @@ type (
 		// this lands so the row hops into the Apps section live.
 		IsBot bool
 	}
+	// UserResolvedMsg arrives asynchronously after main.go's per-workspace
+	// userResolver completes a users.info round-trip for a previously-
+	// unknown message author. The handler patches the in-memory display
+	// name on the messagepane and threadPanel so rows authored by this
+	// user re-render with the real name on the next View().
+	UserResolvedMsg struct {
+		TeamID      string
+		UserID      string
+		DisplayName string
+		IsBot       bool
+	}
 	WorkspaceSwitchedMsg struct {
 		TeamID      string
 		TeamName    string
@@ -1994,6 +2005,17 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		a.SetChannels(items)
+
+	case UserResolvedMsg:
+		if msg.TeamID != a.activeTeamID {
+			break
+		}
+		a.messagepane.PatchUserName(msg.UserID, msg.DisplayName)
+		a.threadPanel.PatchUserName(msg.UserID, msg.DisplayName)
+		// IsBot affects DM channel-type classification, but that's
+		// orchestrated by DMNameResolvedMsg; this handler is only the
+		// in-history name patch. IsBot is carried for forward
+		// compatibility but not consumed here.
 
 	case WorkspaceSwitchedMsg:
 		if a.compose.Uploading() || a.threadCompose.Uploading() {
