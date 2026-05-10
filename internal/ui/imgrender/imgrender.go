@@ -13,12 +13,12 @@ import (
 	"context"
 	"image"
 	"io"
-	"log"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
+	"github.com/gammons/slk/internal/debuglog"
 	imgpkg "github.com/gammons/slk/internal/image"
 	"github.com/gammons/slk/internal/ui/styles"
 )
@@ -338,7 +338,7 @@ func (r *Renderer) RenderBlock(att Block, channel, ts string, availWidth, baseRo
 				return
 			}
 			if err != nil {
-				log.Printf("image fetch failed: key=%s url=%s err=%v", key, url, err)
+				debuglog.ImgFetch("image fetch failed: key=%s url=%s err=%v", key, url, err)
 				ctx.SendMsg(ImageFailedMsg{Key: key})
 				return
 			}
