@@ -103,10 +103,14 @@ type SixelEntry struct {
 // (matching the existing messages-pane behavior).
 func computeImageTarget(thumbs []ThumbSpec, ctx ImageContext, availWidth int) image.Point {
 	if len(thumbs) == 0 || ctx.CellPixels.X <= 0 || ctx.CellPixels.Y <= 0 {
+		debuglog.ImgRender("computeImageTarget: thumbs=%d cell_px=(%d,%d) → zero target",
+			len(thumbs), ctx.CellPixels.X, ctx.CellPixels.Y)
 		return image.Point{}
 	}
 	largest := thumbs[len(thumbs)-1]
 	if largest.W <= 0 || largest.H <= 0 {
+		debuglog.ImgRender("computeImageTarget: largest_thumb_dims=(%d,%d) → zero target",
+			largest.W, largest.H)
 		return image.Point{}
 	}
 	aspect := float64(largest.W) / float64(largest.H)
@@ -124,13 +128,18 @@ func computeImageTarget(thumbs []ThumbSpec, ctx ImageContext, availWidth int) im
 	if cols < 1 {
 		cols = 1
 	}
+	clamped := false
 	if cols > maxCols {
 		cols = maxCols
 		rows = int(float64(cols) * cellRatio / aspect)
+		clamped = true
 	}
 	if rows < 1 {
 		rows = 1
 	}
+	debuglog.ImgRender("computeImageTarget: natural=(%d,%d) avail_cols=%d MaxCols=%d MaxRows=%d cell_px=(%d,%d) target=(%d,%d) clamped_to_cols=%v",
+		largest.W, largest.H, availWidth, ctx.MaxCols, ctx.MaxRows,
+		ctx.CellPixels.X, ctx.CellPixels.Y, cols, rows, clamped)
 	return image.Pt(cols, rows)
 }
 
