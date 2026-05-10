@@ -217,9 +217,11 @@ func blockPlaceholder(target image.Point) []string {
 // BlockImageReadyMsg is dispatched by the prefetcher when a block
 // image has finished downloading. The host's Update handler wires
 // this to a render-cache invalidation for the matching (Channel, TS)
-// message so the next render picks up the cached image.
+// message so the next render picks up the cached image. ReqID is
+// the debuglog correlator threaded from the enqueue site.
 type BlockImageReadyMsg struct {
 	Channel string
 	TS      string
 	URL     string
+	ReqID   uint64
 }
