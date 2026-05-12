@@ -99,6 +99,12 @@ type Model struct {
 	snappedSelection int
 	hasSnapped       bool
 
+	// subscriptionsAvailable tracks whether Slack's
+	// subscriptions.thread.list call succeeded most recently. When
+	// false, View renders a one-line "Threads list unavailable"
+	// banner above the list/empty-state. Default is true (optimistic).
+	subscriptionsAvailable bool
+
 	version int64
 }
 
@@ -111,8 +117,10 @@ func New(userNames map[string]string, selfUserID string) Model {
 		userNames = map[string]string{}
 	}
 	return Model{
-		userNames:  userNames,
-		selfUserID: selfUserID,
+		userNames:              userNames,
+		selfUserID:             selfUserID,
+		channelNames:           map[string]string{},
+		subscriptionsAvailable: true,
 	}
 }
 
@@ -194,6 +202,17 @@ func (m *Model) Focused() bool { return m.focused }
 // selected (channelID, threadTS) pair is still present in the new list, the
 // selection follows it to its new position; otherwise the selection resets
 // to the top.
+// SetSubscriptionsAvailable records whether Slack's authoritative
+// subscription state could be fetched most recently. false flips the
+// "Threads list unavailable" banner on; true clears it.
+func (m *Model) SetSubscriptionsAvailable(available bool) {
+	if m.subscriptionsAvailable == available {
+		return
+	}
+	m.subscriptionsAvailable = available
+	m.dirty()
+}
+
 func (m *Model) SetSummaries(s []cache.ThreadSummary) {
 	prevCh, prevTS, hadSel := m.selectedKey()
 	m.summaries = s
@@ -312,11 +331,10 @@ func (m *Model) ScrollDown(n int) {
 // summary, if any. Returns true when a flag was actually flipped (so callers
 // can refresh dependent state, e.g. the sidebar's threads-row badge). This
 // is a presentation-only update: it does not touch Slack server state and
-// does not advance the parent channel's last_read_ts. The next refresh
-// from cache.ListInvolvedThreads may re-set the flag if its heuristic
-// (LastReplyTS > channel.last_read_ts) still considers the thread unread,
-// but in practice the user opening the parent channel will eventually
-// resolve that.
+// does not advance the thread_subscriptions row's last_read. The next
+// refresh from cache.ListSubscribedThreads will recompute Unread from the
+// persisted per-thread LastRead; a subsequent thread_marked WS echo (or
+// an explicit MarkThreadRead call) is what durably clears it.
 func (m *Model) MarkSelectedRead() bool {
 	if m.selected < 0 || m.selected >= len(m.summaries) {
 		return false
@@ -358,11 +376,11 @@ func (m *Model) MarkByThreadTSRead(channelID, threadTS string) bool {
 // server state. Used by the U-key mark-unread flow and by the inbound
 // thread_marked WS handler.
 //
-// Note: the threads-view's underlying heuristic
-// (LastReplyTS > channel.last_read_ts AND LastReplyBy != self) may
-// re-clear this flag on the next refresh from cache.ListInvolvedThreads
-// if the heuristic considers the thread read. This is the documented
-// v1 limitation; a per-thread last_read_ts column is future work.
+// Note: the next refresh from cache.ListSubscribedThreads recomputes
+// Unread from the thread_subscriptions row's per-thread LastRead. If
+// that value is still ahead of LastReplyTS (e.g. because a stale
+// thread_marked persisted it), the flag may flip back to read on
+// refresh.
 func (m *Model) MarkByThreadTSUnread(channelID, threadTS string) bool {
 	if channelID == "" || threadTS == "" {
 		return false
@@ -413,54 +431,82 @@ func (m *Model) View(height, width int) string {
 		height = 1
 	}
 
+	// Reserve one line for the banner when subscriptions are
+	// unavailable. The banner is muted-style, truncated to width if
+	// needed.
+	var bannerLine string
+	bodyHeight := height
+	if !m.subscriptionsAvailable {
+		bannerText := "Threads list unavailable — Slack subscription state could not be fetched. slk will retry on the next reconnect."
+		if w := lipgloss.Width(bannerText); w > width {
+			// Truncate to width.
+			runes := []rune(bannerText)
+			for i := range runes {
+				if lipgloss.Width(string(runes[:i+1])) > width {
+					bannerText = string(runes[:i])
+					break
+				}
+			}
+		}
+		bannerLine = mutedStyle().Render(bannerText)
+		// Pad to full width so the next line starts cleanly.
+		if pad := width - lipgloss.Width(bannerLine); pad > 0 {
+			bannerLine += strings.Repeat(" ", pad)
+		}
+		bodyHeight = height - 1
+		if bodyHeight < 0 {
+			bodyHeight = 0
+		}
+	}
+
+	// Body: the empty-state placeholder or the rendered rows. Mirror
+	// the existing logic but render into bodyHeight, then prepend the
+	// banner.
+	var body string
 	if len(m.summaries) == 0 {
 		empty := mutedStyle().Render("no threads")
-		return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, empty)
-	}
-
-	// Build the full content as a flat slice of lines.
-	lines := m.renderRows(width)
-
-	// Snap-to-selected: when the selection moves, adjust yOffset so the
-	// selected card is fully visible. Skipped when the selection hasn't
-	// changed since the last snap so manual scrolls (ScrollUp/Down) are
-	// preserved across renders.
-	if !m.hasSnapped || m.snappedSelection != m.selected {
-		m.snapToSelected(height, len(lines))
-		m.snappedSelection = m.selected
-		m.hasSnapped = true
-	}
-
-	// Clamp yOffset against actual content height.
-	maxOffset := len(lines) - height
-	if maxOffset < 0 {
-		maxOffset = 0
-	}
-	if m.yOffset > maxOffset {
-		m.yOffset = maxOffset
-	}
-	if m.yOffset < 0 {
-		m.yOffset = 0
-	}
-
-	end := m.yOffset + height
-	if end > len(lines) {
-		end = len(lines)
-	}
-	visible := lines[m.yOffset:end]
-
-	// Pad to `height` so the panel always fills its allotted vertical
-	// space. Filler is width-padded so column count stays uniform.
-	if pad := height - len(visible); pad > 0 {
-		filler := blankLine(width)
-		out := make([]string, 0, height)
-		out = append(out, visible...)
-		for i := 0; i < pad; i++ {
-			out = append(out, filler)
+		body = lipgloss.Place(width, bodyHeight, lipgloss.Center, lipgloss.Center, empty)
+	} else {
+		lines := m.renderRows(width)
+		if !m.hasSnapped || m.snappedSelection != m.selected {
+			m.snapToSelected(bodyHeight, len(lines))
+			m.snappedSelection = m.selected
+			m.hasSnapped = true
 		}
-		visible = out
+		maxOffset := len(lines) - bodyHeight
+		if maxOffset < 0 {
+			maxOffset = 0
+		}
+		if m.yOffset > maxOffset {
+			m.yOffset = maxOffset
+		}
+		if m.yOffset < 0 {
+			m.yOffset = 0
+		}
+		end := m.yOffset + bodyHeight
+		if end > len(lines) {
+			end = len(lines)
+		}
+		visible := lines[m.yOffset:end]
+		if pad := bodyHeight - len(visible); pad > 0 {
+			filler := blankLine(width)
+			out := make([]string, 0, bodyHeight)
+			out = append(out, visible...)
+			for i := 0; i < pad; i++ {
+				out = append(out, filler)
+			}
+			visible = out
+		}
+		body = strings.Join(visible, "\n")
 	}
-	return strings.Join(visible, "\n")
+
+	if bannerLine == "" {
+		return body
+	}
+	if bodyHeight == 0 {
+		return bannerLine
+	}
+	return bannerLine + "\n" + body
 }
 
 // snapToSelected adjusts yOffset so the entire selected card (3 content

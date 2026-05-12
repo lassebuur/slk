@@ -393,3 +393,45 @@ func TestSelectedCardDimsWhenUnfocused(t *testing.T) {
 		t.Fatal("unfocused selected card still contains focused tint bg; should use unfocused tint")
 	}
 }
+
+func TestView_RendersBannerWhenSubscriptionsUnavailable(t *testing.T) {
+	m := New(map[string]string{}, "U1")
+	m.SetSubscriptionsAvailable(false)
+	out := m.View(10, 80)
+	if !strings.Contains(out, "Threads list unavailable") {
+		t.Errorf("expected banner in view, got:\n%s", out)
+	}
+}
+
+func TestView_NoBannerWhenSubscriptionsAvailable(t *testing.T) {
+	m := New(map[string]string{}, "U1")
+	// Default is true; no need to call setter.
+	out := m.View(10, 80)
+	if strings.Contains(out, "Threads list unavailable") {
+		t.Errorf("did not expect banner, got:\n%s", out)
+	}
+}
+
+func TestView_BannerVisibleWithEmptySummaries(t *testing.T) {
+	m := New(map[string]string{}, "U1")
+	m.SetSubscriptionsAvailable(false)
+	out := m.View(10, 80)
+	if !strings.Contains(out, "Threads list unavailable") {
+		t.Errorf("expected banner with empty summaries, got:\n%s", out)
+	}
+}
+
+func TestView_BannerVisibleWithSummaries(t *testing.T) {
+	m := New(map[string]string{"U2": "alice"}, "U1")
+	m.SetSummaries([]cache.ThreadSummary{
+		{ChannelID: "C1", ChannelName: "general", ThreadTS: "1.0", ParentText: "hi", LastReplyTS: "2.0", LastReplyBy: "U2"},
+	})
+	m.SetSubscriptionsAvailable(false)
+	out := m.View(20, 80)
+	if !strings.Contains(out, "Threads list unavailable") {
+		t.Errorf("expected banner with summaries present, got:\n%s", out)
+	}
+	if !strings.Contains(out, "hi") {
+		t.Errorf("expected summary content alongside banner, got:\n%s", out)
+	}
+}

@@ -125,6 +125,14 @@ type WorkspaceContext struct {
 	// us the workspace has zero unread threads, we trust that and
 	// suppress the heuristic-derived flags entirely.
 	ThreadsHasUnreads bool
+	// SubscriptionsAvailable indicates whether the most recent
+	// runSubscriptionPhase attempt succeeded in fetching Slack's
+	// authoritative thread-subscription list. true on bootstrap
+	// (optimistic — no banner during the brief pre-bootstrap
+	// window) and after every successful subscription phase; false
+	// after a failed one. The UI uses it to decide whether to draw
+	// the "Threads list unavailable" banner.
+	SubscriptionsAvailable bool
 	LastReadMap       map[string]string
 	Channels    []sidebar.ChannelItem
 	// FinderItems is the merged list shown in the Ctrl+T finder. Initially
@@ -914,11 +922,13 @@ func run() error {
 				if err != nil {
 					log.Printf("Warning: failed to mark thread %s/%s as unread (boundary %s): %v", channelID, threadTS, boundaryTS, err)
 				}
-				// No SQLite write for thread-level — the schema has no
-				// per-thread last_read_ts column in v1. The UI updates
-				// via applyThreadMark; on next refresh
-				// cache.ListInvolvedThreads will reconcile from the
-				// channel's last_read_ts heuristic.
+				// No SQLite write here for thread-level — the
+				// thread_subscriptions row's last_read is the
+				// source of truth and gets updated when Slack
+				// echoes back a thread_marked event. The UI
+				// updates immediately via applyThreadMark; on
+				// next refresh cache.ListSubscribedThreads will
+				// reconcile from the persisted subscription row.
 			}
 			return ui.MessageMarkedUnreadMsg{
 				ChannelID:   channelID,
@@ -1020,26 +1030,26 @@ func run() error {
 			if wctx == nil {
 				return nil
 			}
-			summaries, err := db.ListInvolvedThreads(teamID, wctx.Client.UserID())
+			summaries, err := db.ListSubscribedThreads(teamID, wctx.Client.UserID())
 			if err != nil {
-				log.Printf("Warning: ListInvolvedThreads(%s): %v", teamID, err)
-				return ui.ThreadsListLoadedMsg{TeamID: teamID, Summaries: nil}
-			}
-			// If Slack reports zero workspace-wide unread threads,
-			// suppress the local heuristic's Unread flags. Without
-			// this, threads whose parent channel's last_read_ts is
-			// older than the latest reply -- but that the user has
-			// already read in another Slack client -- show as unread
-			// every launch until the user opens the parent channel
-			// itself. We respect the server signal as authoritative
-			// for the "no unreads" case; we can't disambiguate which
-			// threads are unread when the server says some are.
-			if !wctx.ThreadsHasUnreads {
-				for i := range summaries {
-					summaries[i].Unread = false
+				log.Printf("Warning: ListSubscribedThreads(%s): %v", teamID, err)
+				return ui.ThreadsListLoadedMsg{
+					TeamID:                 teamID,
+					Summaries:              nil,
+					SubscriptionsAvailable: wctx.SubscriptionsAvailable,
 				}
 			}
-			return ui.ThreadsListLoadedMsg{TeamID: teamID, Summaries: summaries}
+			// With per-thread last_read in thread_subscriptions, the Unread
+			// flag is now authoritative — the old ThreadsHasUnreads
+			// suppression heuristic that protected against stale
+			// channels.last_read_ts is no longer needed. The closure that
+			// previously zeroed all Unread flags when wctx.ThreadsHasUnreads
+			// was false has been removed.
+			return ui.ThreadsListLoadedMsg{
+				TeamID:                 teamID,
+				Summaries:              summaries,
+				SubscriptionsAvailable: wctx.SubscriptionsAvailable,
+			}
 		})
 
 		app.SetThreadReplySender(func(channelID, threadTS, text string) tea.Msg {
@@ -1337,6 +1347,7 @@ func connectWorkspace(ctx context.Context, token slackclient.Token, db *cache.DB
 		CustomEmoji:          make(map[string]string),
 		LastVisitedByChannel: make(map[string]int64),
 	}
+	wctx.SubscriptionsAvailable = true
 
 	// Seed user names + bot flags from cache (fast, local). The bot
 	// flag is what lets channel construction below classify app DMs
@@ -2709,7 +2720,10 @@ func (h *rtmEventHandler) OnConnect() {
 			program := h.program
 			db := h.db
 			go func() {
-				bf := newBackfiller(wctx.Client, db, workspaceID, wctx.Client.UserID(), program, 4, 500)
+				bf := newBackfiller(
+					wctx.Client, db, workspaceID, wctx.Client.UserID(), program, 4, 500,
+					func(available bool) { wctx.SubscriptionsAvailable = available },
+				)
 				_ = bf.run(context.Background())
 			}()
 		} else {
@@ -2786,9 +2800,19 @@ func (h *rtmEventHandler) OnChannelMarked(channelID, ts string, unreadCount int)
 
 func (h *rtmEventHandler) OnThreadMarked(channelID, threadTS, ts string, read bool) {
 	if h.isActive != nil && !h.isActive() {
-		// Inactive workspace: skip (no per-thread persistence in v1).
 		return
 	}
+
+	// Persist subscription state. active = !read per the dispatch in
+	// internal/slack/events.go: WS `active` means "subscribed for
+	// unread updates", which corresponds to active=1 in our table.
+	if h.db != nil {
+		if err := h.db.UpsertThreadSubscription(h.workspaceID, channelID, threadTS, ts, !read); err != nil {
+			debuglog.Cache("OnThreadMarked: UpsertThreadSubscription %s/%s: %v",
+				channelID, threadTS, err)
+		}
+	}
+
 	if h.program == nil {
 		return
 	}
@@ -2798,6 +2822,26 @@ func (h *rtmEventHandler) OnThreadMarked(channelID, threadTS, ts string, read bo
 		TS:        ts,
 		Read:      read,
 	})
+}
+
+// OnThreadSubscriptionChanged persists a subscribe/unsubscribe event
+// in the thread_subscriptions table. The threads-view UI refresh is
+// handled by a ThreadsListDirtyMsg dispatch so a new subscription
+// shows up (active=true) or an unsubscribe removes the row
+// (active=false) without per-event UI logic here.
+func (h *rtmEventHandler) OnThreadSubscriptionChanged(channelID, threadTS, lastRead string, active bool) {
+	if h.isActive != nil && !h.isActive() {
+		return
+	}
+	if h.db != nil {
+		if err := h.db.UpsertThreadSubscription(h.workspaceID, channelID, threadTS, lastRead, active); err != nil {
+			debuglog.Cache("OnThreadSubscriptionChanged: UpsertThreadSubscription %s/%s: %v",
+				channelID, threadTS, err)
+		}
+	}
+	if h.program != nil {
+		h.program.Send(ui.ThreadsListDirtyMsg{TeamID: h.workspaceID})
+	}
 }
 
 // OnConversationOpened handles WS events that surface a new or

@@ -168,6 +168,11 @@ type (
 	ThreadsListLoadedMsg struct {
 		TeamID    string
 		Summaries []cache.ThreadSummary
+		// SubscriptionsAvailable reflects whether the most recent
+		// runSubscriptionPhase succeeded in fetching the authoritative
+		// thread-subscription list. The threads view renders a banner
+		// when false (Task 10 wires the renderer).
+		SubscriptionsAvailable bool
 	}
 	// ThreadsListDirtyMsg is dispatched when something that could affect
 	// the involved-threads list has changed (new message, mention, etc.)
@@ -1936,6 +1941,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case ThreadsListLoadedMsg:
 		if msg.TeamID == a.activeTeamID {
 			a.threadsView.SetSummaries(msg.Summaries)
+			a.threadsView.SetSubscriptionsAvailable(msg.SubscriptionsAvailable)
 			a.sidebar.SetThreadsUnreadCount(a.threadsView.UnreadCount())
 			if a.view == ViewThreads {
 				// List reload is a single event; if the dedup

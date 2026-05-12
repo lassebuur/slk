@@ -1189,3 +1189,146 @@ func (c *Client) GetChannelSections(ctx context.Context) ([]SidebarSection, erro
 	}
 	return all, nil
 }
+
+// ThreadSubscription is the slk-side projection of one subscribed
+// thread returned by subscriptions.thread.getView. The five fields
+// here map cleanly onto cache.ThreadSubscription. The caller in
+// cmd/slk/reconnect_backfill.go does the adapter cast.
+type ThreadSubscription struct {
+	ChannelID string
+	ThreadTS  string
+	LastRead  string
+	Active    bool
+}
+
+// ThreadSubscriptionView is one item from subscriptions.thread.getView.
+// It carries both the subscription-state projection (Subscription) and
+// the full parent message Slack ships inside root_msg
+// (RootMessage). The subscription-phase backfiller uses Subscription
+// to upsert the thread_subscriptions row and RootMessage to upsert
+// the parent into the messages cache, eliminating the need for a
+// follow-up conversations.replies fetch when the parent isn't
+// already cached.
+type ThreadSubscriptionView struct {
+	Subscription ThreadSubscription
+	RootMessage  slack.Message
+}
+
+// listThreadSubscriptionsResponse decodes one page of
+// subscriptions.thread.getView.
+type listThreadSubscriptionsResponse struct {
+	OK      bool   `json:"ok"`
+	Error   string `json:"error"`
+	Threads []struct {
+		// RootMsg is decoded twice: once into the typed
+		// slackThreadRootMsg shape for the channel/last_read/subscribed
+		// fields we need, and once into a slack.Message via json.RawMessage
+		// so the caller can re-marshal it for the messages cache.
+		RootMsg json.RawMessage `json:"root_msg"`
+	} `json:"threads"`
+	HasMore bool   `json:"has_more"`
+	MaxTS   string `json:"max_ts"`
+}
+
+// slackThreadRootMsg is the subset of root_msg fields the
+// subscription-phase reconcile needs. The rest of root_msg flows
+// through as slack.Message via the raw JSON re-parse.
+type slackThreadRootMsg struct {
+	Channel    string `json:"channel"`
+	TS         string `json:"ts"`
+	ThreadTS   string `json:"thread_ts"`
+	LastRead   string `json:"last_read"`
+	Subscribed bool   `json:"subscribed"`
+}
+
+// listThreadSubscriptionsHardCap bounds how many subscriptions
+// ListThreadSubscriptions will return per call. Protects against
+// runaway requests if Slack ships a buggy has_more flag.
+const listThreadSubscriptionsHardCap = 1000
+
+// ListThreadSubscriptions fetches the workspace's full subscribed-
+// threads list via Slack's internal subscriptions.thread.getView
+// endpoint (the same call the official web client makes when
+// bootstrapping its Threads view). Paginates via the `current_ts`
+// form field (set to the previous response's max_ts), terminated by
+// has_more=false. Stops at listThreadSubscriptionsHardCap items.
+//
+// Items where root_msg.subscribed is false are filtered out —
+// defensive, since the live endpoint hasn't been observed returning
+// them.
+//
+// Returns (nil, err) on network failure or ok=false JSON. The caller
+// (the reconnect backfill phase) treats any error as "subscriptions
+// unavailable" and surfaces the UI banner.
+func (c *Client) ListThreadSubscriptions(ctx context.Context) ([]ThreadSubscriptionView, error) {
+	var all []ThreadSubscriptionView
+	currentTS := ""
+	for {
+		body, err := c.callListThreadSubscriptions(ctx, currentTS)
+		if err != nil {
+			return nil, err
+		}
+		var resp listThreadSubscriptionsResponse
+		if err := json.Unmarshal(body, &resp); err != nil {
+			return nil, fmt.Errorf("parsing subscriptions.thread.getView: %w (body=%s)", err, truncateForLog(body))
+		}
+		if !resp.OK {
+			return nil, fmt.Errorf("subscriptions.thread.getView: %s (body=%s)", resp.Error, truncateForLog(body))
+		}
+		for _, item := range resp.Threads {
+			var sm slackThreadRootMsg
+			if err := json.Unmarshal(item.RootMsg, &sm); err != nil {
+				// Skip malformed items but keep paginating.
+				debuglog.Backfill("ListThreadSubscriptions: skipping malformed root_msg: %v", err)
+				continue
+			}
+			if !sm.Subscribed {
+				continue
+			}
+			var raw slack.Message
+			if err := json.Unmarshal(item.RootMsg, &raw); err != nil {
+				// Couldn't decode the rich message; skip so we don't
+				// corrupt the messages cache, but the subscription row
+				// is still useful — fall back to a synthetic empty
+				// slack.Message so the caller can still record the row.
+				debuglog.Backfill("ListThreadSubscriptions: root_msg slack.Message decode err=%v; subscription kept without RootMessage", err)
+				raw = slack.Message{}
+			}
+			all = append(all, ThreadSubscriptionView{
+				Subscription: ThreadSubscription{
+					ChannelID: sm.Channel,
+					ThreadTS:  sm.ThreadTS,
+					LastRead:  sm.LastRead,
+					Active:    sm.Subscribed,
+				},
+				RootMessage: raw,
+			})
+			if len(all) >= listThreadSubscriptionsHardCap {
+				debuglog.Backfill("ListThreadSubscriptions: hit hard cap %d, stopping", listThreadSubscriptionsHardCap)
+				return all, nil
+			}
+		}
+		if !resp.HasMore || resp.MaxTS == "" {
+			break
+		}
+		// Note: unlike GetChannelSections we do NOT bail when the
+		// server echoes back the same MaxTS — the
+		// listThreadSubscriptionsHardCap above is the runaway-protection
+		// mechanism for this endpoint, and the hard-cap test exercises
+		// exactly that case (server returns has_more=true with an
+		// unchanging max_ts forever).
+		currentTS = resp.MaxTS
+	}
+	return all, nil
+}
+
+func (c *Client) callListThreadSubscriptions(ctx context.Context, currentTS string) ([]byte, error) {
+	form := url.Values{}
+	form.Set("limit", "100")
+	form.Set("fetch_threads_state", "true")
+	form.Set("priority_mode", "all")
+	if currentTS != "" {
+		form.Set("current_ts", currentTS)
+	}
+	return c.postForm(ctx, "subscriptions.thread.getView", form)
+}

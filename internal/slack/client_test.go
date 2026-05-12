@@ -1626,3 +1626,156 @@ func TestGetHistorySince_NoMessages(t *testing.T) {
 		t.Errorf("expected empty, got %+v", msgs)
 	}
 }
+
+func TestListThreadSubscriptions_PaginatesUntilExhausted(t *testing.T) {
+	var calls int
+	var capturedCurrentTS []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		_ = r.ParseForm()
+		capturedCurrentTS = append(capturedCurrentTS, r.PostForm.Get("current_ts"))
+		w.Header().Set("Content-Type", "application/json")
+		switch calls {
+		case 1:
+			_, _ = w.Write([]byte(`{
+				"ok": true,
+				"threads": [
+					{"root_msg": {"channel": "C1", "ts": "1700000000.000100", "thread_ts": "1700000000.000100", "last_read": "1700000000.000200", "subscribed": true, "user": "U2", "text": "p1"}},
+					{"root_msg": {"channel": "C2", "ts": "1700000001.000100", "thread_ts": "1700000001.000100", "last_read": "1700000001.000200", "subscribed": true, "user": "U3", "text": "p2"}}
+				],
+				"has_more": true,
+				"max_ts": "1700000001.000100"
+			}`))
+		case 2:
+			_, _ = w.Write([]byte(`{
+				"ok": true,
+				"threads": [
+					{"root_msg": {"channel": "C3", "ts": "1700000002.000100", "thread_ts": "1700000002.000100", "last_read": "1700000002.000200", "subscribed": true, "user": "U4", "text": "p3"}}
+				],
+				"has_more": false,
+				"max_ts": "1700000002.000100"
+			}`))
+		default:
+			t.Fatalf("unexpected call %d", calls)
+		}
+	}))
+	defer srv.Close()
+
+	c := &Client{token: "xoxc-test", cookie: "d-cookie", apiBaseURL: srv.URL + "/api/"}
+	got, err := c.ListThreadSubscriptions(context.Background())
+	if err != nil {
+		t.Fatalf("ListThreadSubscriptions: %v", err)
+	}
+	if calls != 2 {
+		t.Errorf("calls = %d, want 2", calls)
+	}
+	if len(got) != 3 {
+		t.Errorf("len(got) = %d, want 3", len(got))
+	}
+	if got[0].Subscription.ChannelID != "C1" || got[2].Subscription.ChannelID != "C3" {
+		t.Errorf("got = %+v", got)
+	}
+	if got[0].RootMessage.Text != "p1" {
+		t.Errorf("expected root_msg.text to populate RootMessage.Text, got %+v", got[0].RootMessage)
+	}
+	if capturedCurrentTS[0] != "" || capturedCurrentTS[1] != "1700000001.000100" {
+		t.Errorf("current_ts = %v, want [\"\", \"1700000001.000100\"]", capturedCurrentTS)
+	}
+}
+
+func TestListThreadSubscriptions_EmptyResponse(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok": true, "threads": [], "has_more": false, "max_ts": ""}`))
+	}))
+	defer srv.Close()
+
+	c := &Client{token: "xoxc-test", cookie: "d-cookie", apiBaseURL: srv.URL + "/api/"}
+	got, err := c.ListThreadSubscriptions(context.Background())
+	if err != nil {
+		t.Fatalf("ListThreadSubscriptions: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("len(got) = %d, want 0", len(got))
+	}
+}
+
+func TestListThreadSubscriptions_RespectsHardCap(t *testing.T) {
+	// Server returns 100 subs per page with has_more=true forever.
+	// The client should stop after the hard cap (1000) and never make
+	// an 11th call.
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.Header().Set("Content-Type", "application/json")
+		var b []byte
+		b = append(b, []byte(`{"ok": true, "threads": [`)...)
+		for i := 0; i < 100; i++ {
+			if i > 0 {
+				b = append(b, ',')
+			}
+			b = append(b, []byte(`{"root_msg": {"channel": "C", "ts": "1.0", "thread_ts": "1.0", "last_read": "1.0", "subscribed": true, "user": "U"}}`)...)
+		}
+		b = append(b, []byte(`], "has_more": true, "max_ts": "1.0"}`)...)
+		_, _ = w.Write(b)
+	}))
+	defer srv.Close()
+
+	c := &Client{token: "xoxc-test", cookie: "d-cookie", apiBaseURL: srv.URL + "/api/"}
+	got, err := c.ListThreadSubscriptions(context.Background())
+	if err != nil {
+		t.Fatalf("ListThreadSubscriptions: %v", err)
+	}
+	if len(got) != 1000 {
+		t.Errorf("len(got) = %d, want 1000 (hard cap)", len(got))
+	}
+	if calls != 10 {
+		t.Errorf("calls = %d, want 10 (1000 / 100 per page)", calls)
+	}
+}
+
+func TestListThreadSubscriptions_FiltersUnsubscribedItems(t *testing.T) {
+	// Defensively drop any items the server marks as subscribed=false.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"ok": true,
+			"threads": [
+				{"root_msg": {"channel": "C1", "ts": "1.0", "thread_ts": "1.0", "last_read": "1.0", "subscribed": true}},
+				{"root_msg": {"channel": "C2", "ts": "2.0", "thread_ts": "2.0", "last_read": "2.0", "subscribed": false}}
+			],
+			"has_more": false,
+			"max_ts": ""
+		}`))
+	}))
+	defer srv.Close()
+
+	c := &Client{token: "xoxc-test", cookie: "d-cookie", apiBaseURL: srv.URL + "/api/"}
+	got, err := c.ListThreadSubscriptions(context.Background())
+	if err != nil {
+		t.Fatalf("ListThreadSubscriptions: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("len(got) = %d, want 1 (unsubscribed filtered out)", len(got))
+	}
+	if got[0].Subscription.ChannelID != "C1" {
+		t.Errorf("wrong item survived filter: %+v", got[0])
+	}
+}
+
+func TestListThreadSubscriptions_ReturnsErrorOnNotOK(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok": false, "error": "invalid_auth"}`))
+	}))
+	defer srv.Close()
+
+	c := &Client{token: "xoxc-test", cookie: "d-cookie", apiBaseURL: srv.URL + "/api/"}
+	_, err := c.ListThreadSubscriptions(context.Background())
+	if err == nil {
+		t.Fatalf("expected error on ok=false, got nil")
+	}
+	if !strings.Contains(err.Error(), "invalid_auth") {
+		t.Errorf("error = %q, want contains \"invalid_auth\"", err.Error())
+	}
+}
