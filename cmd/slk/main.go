@@ -2709,7 +2709,7 @@ func (h *rtmEventHandler) OnConnect() {
 			program := h.program
 			db := h.db
 			go func() {
-				bf := newBackfiller(wctx.Client, db, workspaceID, wctx.Client.UserID(), program, 4, 500)
+				bf := newBackfiller(wctx.Client, db, workspaceID, wctx.Client.UserID(), program, 4, 500, nil /* availableCb wired in Task 9 */)
 				_ = bf.run(context.Background())
 			}()
 		} else {

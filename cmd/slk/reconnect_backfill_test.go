@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
@@ -10,6 +11,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/gammons/slk/internal/cache"
+	slackclient "github.com/gammons/slk/internal/slack"
 	"github.com/gammons/slk/internal/ui"
 	"github.com/slack-go/slack"
 )
@@ -27,6 +29,22 @@ type fakeHistory struct {
 	oldestSeen       map[string][]string // per-channel: oldest param of each call, in order
 	repliesResponses map[string][]slack.Message // keyed by threadTS
 	repliesCalls     []struct{ Channel, TS string }
+
+	subscriptionsResponse []slackclient.ThreadSubscriptionView
+	subscriptionsErr      error
+	subscriptionsCalls    int
+}
+
+// ListThreadSubscriptions satisfies historyFetcher. Returns the
+// preconfigured slice (or error) and increments the call counter.
+func (f *fakeHistory) ListThreadSubscriptions(ctx context.Context) ([]slackclient.ThreadSubscriptionView, error) {
+	f.mu.Lock()
+	f.subscriptionsCalls++
+	f.mu.Unlock()
+	if f.subscriptionsErr != nil {
+		return nil, f.subscriptionsErr
+	}
+	return f.subscriptionsResponse, nil
 }
 
 // GetHistorySince satisfies historyFetcher. It looks up the per-channel
@@ -115,7 +133,7 @@ func TestBackfillChannels_FetchesPerChannelSinceSyncedAt(t *testing.T) {
 		oldestSeen: map[string][]string{},
 	}
 
-	bf := newBackfiller(fh, db, "T1", "USELF", nil, 4, 500)
+	bf := newBackfiller(fh, db, "T1", "USELF", nil, 4, 500, nil)
 	if err := bf.runChannelPhase(context.Background()); err != nil {
 		t.Fatalf("runChannelPhase: %v", err)
 	}
@@ -158,7 +176,7 @@ func TestBackfillChannels_BoundedConcurrency(t *testing.T) {
 		oldestSeen: map[string][]string{},
 	}
 
-	bf := newBackfiller(fh, db, "T1", "USELF", nil, 4, 500)
+	bf := newBackfiller(fh, db, "T1", "USELF", nil, 4, 500, nil)
 	if err := bf.runChannelPhase(context.Background()); err != nil {
 		t.Fatalf("runChannelPhase: %v", err)
 	}
@@ -204,7 +222,7 @@ func TestBackfillThreads_FetchesRepliesForInvolvedThreads(t *testing.T) {
 		},
 	}
 
-	bf := newBackfiller(fh, db, "T1", "USELF", nil, 4, 500)
+	bf := newBackfiller(fh, db, "T1", "USELF", nil, 4, 500, nil)
 	if err := bf.run(context.Background()); err != nil {
 		t.Fatalf("run: %v", err)
 	}
@@ -235,7 +253,7 @@ func TestBackfill_FiresThreadsListDirtyMsg(t *testing.T) {
 	}
 
 	captured := &captureSender{}
-	bf := newBackfiller(fh, db, "T1", "USELF", captured, 4, 500)
+	bf := newBackfiller(fh, db, "T1", "USELF", captured, 4, 500, nil)
 	if err := bf.run(context.Background()); err != nil {
 		t.Fatalf("run: %v", err)
 	}
@@ -268,5 +286,153 @@ func TestBackfill_DedupeWindow(t *testing.T) {
 	third := gate.tryStart(time.Unix(1031, 0))
 	if !third {
 		t.Error("call after window should be allowed")
+	}
+}
+
+// subView constructs a ThreadSubscriptionView from primitives so the
+// subscription-phase tests stay readable.
+func subView(channel, threadTS, lastRead, text, user string, active bool) slackclient.ThreadSubscriptionView {
+	return slackclient.ThreadSubscriptionView{
+		Subscription: slackclient.ThreadSubscription{
+			ChannelID: channel, ThreadTS: threadTS, LastRead: lastRead, Active: active,
+		},
+		RootMessage: slack.Message{
+			Msg: slack.Msg{
+				Timestamp:       threadTS,
+				ThreadTimestamp: threadTS,
+				User:            user,
+				Text:            text,
+				Channel:         channel,
+			},
+		},
+	}
+}
+
+// TestBackfillSubscriptions_PopulatesTable verifies that the phase
+// fetches the workspace's subscription list and writes each active
+// item into the thread_subscriptions table.
+func TestBackfillSubscriptions_PopulatesTable(t *testing.T) {
+	db := newTestDB(t)
+	fake := &fakeHistory{
+		responses: map[string][]*slack.GetConversationHistoryResponse{}, // no channels
+		subscriptionsResponse: []slackclient.ThreadSubscriptionView{
+			subView("C1", "1700000100.000000", "1700000150.000000", "p1", "U2", true),
+			subView("C2", "1700000200.000000", "1700000250.000000", "p2", "U3", true),
+		},
+	}
+	bf := newBackfiller(fake, db, "T1", "U1", nil, 4, 500, nil)
+	if err := bf.runSubscriptionPhase(context.Background()); err != nil {
+		t.Fatalf("runSubscriptionPhase: %v", err)
+	}
+	got, err := db.ListActiveThreadSubscriptions("T1")
+	if err != nil {
+		t.Fatalf("ListActiveThreadSubscriptions: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("want 2 subscriptions in DB, got %d", len(got))
+	}
+}
+
+// TestBackfillSubscriptions_UpsertsRootMessageIntoMessagesCache
+// verifies that every root_msg from the view response is upserted
+// into the messages cache so the threads view can render parents
+// even without a separate conversations.replies fetch.
+func TestBackfillSubscriptions_UpsertsRootMessageIntoMessagesCache(t *testing.T) {
+	db := newTestDB(t)
+	if err := db.UpsertChannel(cache.Channel{ID: "C1", WorkspaceID: "T1", Name: "general"}); err != nil {
+		t.Fatalf("UpsertChannel: %v", err)
+	}
+	fake := &fakeHistory{
+		subscriptionsResponse: []slackclient.ThreadSubscriptionView{
+			subView("C1", "1700000100.000000", "1700000150.000000", "parent X", "U2", true),
+		},
+	}
+	bf := newBackfiller(fake, db, "T1", "U1", nil, 4, 500, nil)
+	if err := bf.runSubscriptionPhase(context.Background()); err != nil {
+		t.Fatalf("runSubscriptionPhase: %v", err)
+	}
+
+	// The root_msg should have been upserted into the messages cache.
+	msgs, err := db.GetThreadReplies("C1", "1700000100.000000")
+	if err != nil {
+		t.Fatalf("GetThreadReplies: %v", err)
+	}
+	if len(msgs) != 1 {
+		t.Fatalf("want 1 cached message (the parent), got %d", len(msgs))
+	}
+	if msgs[0].Text != "parent X" || msgs[0].UserID != "U2" {
+		t.Fatalf("root_msg fields not preserved: %+v", msgs[0])
+	}
+
+	// No GetReplies calls should have been made — root_msg already
+	// gave us the parent.
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	if len(fake.repliesCalls) != 0 {
+		t.Fatalf("expected 0 GetReplies calls, got %d: %v", len(fake.repliesCalls), fake.repliesCalls)
+	}
+}
+
+// TestBackfillSubscriptions_ReconcilesUnsubscribes verifies that a
+// local subscription absent from the server's fresh list is
+// tombstoned (no longer active).
+func TestBackfillSubscriptions_ReconcilesUnsubscribes(t *testing.T) {
+	db := newTestDB(t)
+	// Seed a local subscription that's no longer in the server's fresh list.
+	if err := db.UpsertThreadSubscription("T1", "C1", "1700000100.000000", "1700000150.000000", true); err != nil {
+		t.Fatalf("UpsertThreadSubscription: %v", err)
+	}
+	fake := &fakeHistory{
+		subscriptionsResponse: []slackclient.ThreadSubscriptionView{
+			subView("C2", "1700000300.000000", "1700000350.000000", "p2", "U3", true),
+		},
+	}
+	bf := newBackfiller(fake, db, "T1", "U1", nil, 4, 500, nil)
+	if err := bf.runSubscriptionPhase(context.Background()); err != nil {
+		t.Fatalf("runSubscriptionPhase: %v", err)
+	}
+	got, err := db.ListActiveThreadSubscriptions("T1")
+	if err != nil {
+		t.Fatalf("ListActiveThreadSubscriptions: %v", err)
+	}
+	if len(got) != 1 || got[0].ChannelID != "C2" {
+		t.Fatalf("expected only C2 active after reconcile, got %+v", got)
+	}
+}
+
+// TestBackfillSubscriptions_ErrorTriggersAvailabilityCallback verifies
+// that an API error fires availableCb(false) and surfaces the error
+// to the caller.
+func TestBackfillSubscriptions_ErrorTriggersAvailabilityCallback(t *testing.T) {
+	db := newTestDB(t)
+	fake := &fakeHistory{
+		subscriptionsErr: errors.New("network kaboom"),
+	}
+	var calls []bool
+	cb := func(available bool) { calls = append(calls, available) }
+	bf := newBackfiller(fake, db, "T1", "U1", nil, 4, 500, cb)
+
+	if err := bf.runSubscriptionPhase(context.Background()); err == nil {
+		t.Fatalf("expected error, got nil")
+	}
+	if len(calls) != 1 || calls[0] != false {
+		t.Fatalf("expected one callback with available=false, got %v", calls)
+	}
+}
+
+// TestBackfillSubscriptions_SuccessTriggersAvailabilityCallback
+// verifies that a successful pass fires availableCb(true) exactly
+// once.
+func TestBackfillSubscriptions_SuccessTriggersAvailabilityCallback(t *testing.T) {
+	db := newTestDB(t)
+	fake := &fakeHistory{}
+	var calls []bool
+	cb := func(available bool) { calls = append(calls, available) }
+	bf := newBackfiller(fake, db, "T1", "U1", nil, 4, 500, cb)
+	if err := bf.runSubscriptionPhase(context.Background()); err != nil {
+		t.Fatalf("runSubscriptionPhase: %v", err)
+	}
+	if len(calls) != 1 || calls[0] != true {
+		t.Fatalf("expected one callback with available=true, got %v", calls)
 	}
 }

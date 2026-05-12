@@ -10,6 +10,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/gammons/slk/internal/cache"
 	"github.com/gammons/slk/internal/debuglog"
+	slackclient "github.com/gammons/slk/internal/slack"
 	"github.com/gammons/slk/internal/ui"
 	"github.com/slack-go/slack"
 )
@@ -23,6 +24,7 @@ import (
 type historyFetcher interface {
 	GetHistorySince(ctx context.Context, channelID, oldest string, maxTotal int) ([]slack.Message, error)
 	GetReplies(ctx context.Context, channelID, threadTS string) ([]slack.Message, error)
+	ListThreadSubscriptions(ctx context.Context) ([]slackclient.ThreadSubscriptionView, error)
 }
 
 // teaSender is the subset of *tea.Program the backfiller uses to
@@ -55,6 +57,12 @@ type backfiller struct {
 	// Stored as a set of (channelID, threadTS) pairs.
 	mu                sync.Mutex
 	discoveredThreads map[threadKey]struct{}
+
+	// availableCb, if non-nil, is called with the outcome of the
+	// subscription-phase API call: true on success, false on error.
+	// The OnConnect site wires this to wctx.SubscriptionsAvailable so
+	// the UI banner reflects the most recent attempt.
+	availableCb func(bool)
 }
 
 // threadKey is the composite identifier of a thread in the cache:
@@ -67,7 +75,7 @@ type threadKey struct {
 // newBackfiller constructs a backfiller. concurrency caps simultaneous
 // HTTP calls (use 4 in production); perChannelCap is the maxTotal
 // passed to GetHistorySince (use 500).
-func newBackfiller(client historyFetcher, db *cache.DB, workspaceID, selfUserID string, program teaSender, concurrency, perChannelCap int) *backfiller {
+func newBackfiller(client historyFetcher, db *cache.DB, workspaceID, selfUserID string, program teaSender, concurrency, perChannelCap int, availableCb func(bool)) *backfiller {
 	if concurrency < 1 {
 		concurrency = 1
 	}
@@ -83,6 +91,7 @@ func newBackfiller(client historyFetcher, db *cache.DB, workspaceID, selfUserID 
 		concurrency:       concurrency,
 		perChannelCap:     perChannelCap,
 		discoveredThreads: map[threadKey]struct{}{},
+		availableCb:       availableCb,
 	}
 }
 
@@ -255,10 +264,98 @@ func (b *backfiller) backfillOneThread(ctx context.Context, k threadKey) error {
 	return nil
 }
 
-// run executes the full backfill pass: channel phase, then thread
-// phase, then a ThreadsListDirtyMsg dispatch so the UI re-queries
-// the threads view from the now-current cache. Phase errors are
-// logged but do not abort subsequent work — best-effort overall.
+// runSubscriptionPhase fetches the workspace's full thread-subscription
+// list via subscriptions.thread.getView, reconciles the local
+// thread_subscriptions table against it, and upserts every returned
+// root_msg into the messages cache so the threads-view can render
+// parents even for threads slk has never seen a message from.
+//
+// Side effects:
+//  1. thread_subscriptions reflects the server's authoritative state.
+//  2. b.availableCb is called with true/false so the UI banner can
+//     reflect the outcome.
+//  3. Each ThreadSubscriptionView.RootMessage is upserted into the
+//     messages cache (idempotent by (ts, channel_id)).
+//
+// Errors from the API call are returned to the caller; per-thread
+// message-upsert failures are logged and skipped (one bad message
+// does not abort the pass).
+func (b *backfiller) runSubscriptionPhase(ctx context.Context) error {
+	start := time.Now()
+	views, err := b.client.ListThreadSubscriptions(ctx)
+	if err != nil {
+		debuglog.Backfill("team=%s subscription-phase err=%v", b.workspaceID, err)
+		if b.availableCb != nil {
+			b.availableCb(false)
+		}
+		return err
+	}
+	if b.availableCb != nil {
+		b.availableCb(true)
+	}
+
+	// Adapt slack-client view rows into cache.ThreadSubscription. The
+	// API method already filters out subscribed=false items, so the
+	// list is conservative: every item here is currently active.
+	fresh := make([]cache.ThreadSubscription, 0, len(views))
+	for _, v := range views {
+		if !v.Subscription.Active {
+			continue
+		}
+		fresh = append(fresh, cache.ThreadSubscription{
+			WorkspaceID: b.workspaceID,
+			ChannelID:   v.Subscription.ChannelID,
+			ThreadTS:    v.Subscription.ThreadTS,
+			LastRead:    v.Subscription.LastRead,
+			Active:      true,
+		})
+	}
+	if err := b.db.ReconcileThreadSubscriptions(b.workspaceID, fresh); err != nil {
+		debuglog.Backfill("team=%s reconcile err=%v", b.workspaceID, err)
+		return err
+	}
+
+	// Upsert the root_msg from every view into the messages cache.
+	// Mirrors the upsert pattern in backfillOneThread (the parent
+	// payload comes from a different endpoint here, but the cache
+	// row shape is the same). Skip entries where RootMessage is
+	// empty (Subscription kept but RootMessage couldn't be decoded;
+	// see the ListThreadSubscriptions docstring).
+	upserted := 0
+	for _, v := range views {
+		if v.RootMessage.Timestamp == "" {
+			continue
+		}
+		raw, _ := json.Marshal(v.RootMessage)
+		if err := b.db.UpsertMessage(cache.Message{
+			TS:          v.RootMessage.Timestamp,
+			ChannelID:   v.Subscription.ChannelID,
+			WorkspaceID: b.workspaceID,
+			UserID:      v.RootMessage.User,
+			Text:        v.RootMessage.Text,
+			ThreadTS:    v.RootMessage.ThreadTimestamp,
+			ReplyCount:  v.RootMessage.ReplyCount,
+			Subtype:     v.RootMessage.SubType,
+			RawJSON:     string(raw),
+			CreatedAt:   time.Now().Unix(),
+		}); err != nil {
+			debuglog.Backfill("team=%s subscription-phase upsert root_msg %s/%s err=%v",
+				b.workspaceID, v.Subscription.ChannelID, v.Subscription.ThreadTS, err)
+			continue
+		}
+		upserted++
+	}
+
+	debuglog.Backfill("team=%s subscription-phase subs=%d root_msgs_upserted=%d dur_ms=%d",
+		b.workspaceID, len(fresh), upserted, time.Since(start).Milliseconds())
+	return nil
+}
+
+// run executes the full backfill pass: channel phase, thread phase,
+// subscription phase, then a ThreadsListDirtyMsg dispatch so the UI
+// re-queries the threads view from the now-current cache. Phase
+// errors are logged but do not abort subsequent work — best-effort
+// overall.
 func (b *backfiller) run(ctx context.Context) error {
 	start := time.Now()
 	if err := b.runChannelPhase(ctx); err != nil {
@@ -266,6 +363,9 @@ func (b *backfiller) run(ctx context.Context) error {
 	}
 	if err := b.runThreadPhase(ctx); err != nil {
 		debuglog.Backfill("team=%s thread-phase err=%v", b.workspaceID, err)
+	}
+	if err := b.runSubscriptionPhase(ctx); err != nil {
+		debuglog.Backfill("team=%s subscription-phase err=%v", b.workspaceID, err)
 	}
 	if b.program != nil {
 		b.program.Send(ui.ThreadsListDirtyMsg{TeamID: b.workspaceID})
