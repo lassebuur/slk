@@ -600,6 +600,131 @@ func TestBackfill_NewDM_NoCachedMessages_IsCaughtUp(t *testing.T) {
 	}
 }
 
+// TestBackfill_OvernightSuspendScenario reproduces the user-reported
+// "left slk open, laptop suspended for 8 hours, sync was wrong"
+// failure. It exercises three different channel categories
+// simultaneously to catch any regression in the watermark +
+// candidate-set logic.
+func TestBackfill_OvernightSuspendScenario(t *testing.T) {
+	db := newTestDB(t)
+	// newTestDB already registers t.Cleanup(db.Close); no explicit
+	// defer needed (and would be a double-close).
+
+	// --- Setup: pre-suspend state ---
+
+	// A: an active channel with cached history and a recent watermark.
+	if err := db.UpsertChannel(cache.Channel{ID: "A", WorkspaceID: "T1", Name: "team-eng", Type: "channel", IsMember: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.UpsertMessage(cache.Message{TS: "1700000100.000000", ChannelID: "A", WorkspaceID: "T1", UserID: "U1", Text: "before suspend", CreatedAt: 1700000100}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetChannelLatestSyncedTS("A", "1700000100.000000"); err != nil {
+		t.Fatal(err)
+	}
+
+	// B: a brand-new DM (no UpsertChannel, no messages). Arrived
+	// during the offline window.
+	// (Nothing to set up here — the absence IS the setup.)
+
+	// C: a quiet channel cached weeks ago, no activity overnight.
+	if err := db.UpsertChannel(cache.Channel{ID: "C", WorkspaceID: "T1", Name: "off-topic", Type: "channel", IsMember: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.UpsertMessage(cache.Message{TS: "1690000000.000000", ChannelID: "C", WorkspaceID: "T1", UserID: "U2", Text: "old chatter", CreatedAt: 1690000000}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetChannelLatestSyncedTS("C", "1690000000.000000"); err != nil {
+		t.Fatal(err)
+	}
+
+	// --- Server state at wake-up ---
+
+	fh := &fakeHistory{
+		history: map[string][]slack.Message{
+			// A got 5 new messages during the offline window. The
+			// API will return them all (cap is 100), so the watermark
+			// must advance to the highest ts.
+			"A": makeBackfillMessages("1700008000", 5),
+
+			// B got 1 message — the new DM the user must not miss.
+			"B": {{Msg: slack.Msg{
+				Type: "message", Timestamp: "1700008500.000000",
+				User: "U_FRIEND", Text: "first time DM",
+			}}},
+
+			// C had no new activity. The fake returns empty for "C".
+		},
+		unreads: []slackclient.UnreadInfo{
+			{ChannelID: "A", HasUnread: true, Count: 5, LastRead: "1700000100.000000"},
+			{ChannelID: "B", HasUnread: true, Count: 1, LastRead: "0"},
+			// C is not in unreads → must still be backfilled because
+			// it's in the cached-channels set, even though the result
+			// will be empty.
+		},
+	}
+
+	bf := newBackfiller(fh, db, "T1", "U_ME", nil, 4, 100, nil)
+	if err := bf.run(context.Background()); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	// --- Post-conditions ---
+
+	// A: all 5 new messages cached, watermark advanced to the highest.
+	msgsA, err := db.GetMessages("A", 100, "")
+	if err != nil {
+		t.Fatalf("GetMessages A: %v", err)
+	}
+	if len(msgsA) != 6 { // 1 pre + 5 new
+		t.Errorf("A: expected 6 messages, got %d", len(msgsA))
+	}
+	// Highest ts from makeBackfillMessages("1700008000", 5):
+	// base "1700008000" + index 4 (0-based), formatted as "%s.%06d".
+	if got := db.GetChannelLatestSyncedTS("A"); got != "1700008000.000004" {
+		t.Errorf("A watermark: got %q want %q", got, "1700008000.000004")
+	}
+
+	// B: the new DM is in the cache. We intentionally do NOT assert
+	// B's watermark here. With cap=100 and a 1-message response,
+	// fakeHistory returns Capped=false, so the production code WILL
+	// advance B's watermark to "1700008500.000000" — but that
+	// behavior is covered by TestBackfill_NewDM_NoCachedMessages_IsCaughtUp.
+	// Asserting it here would couple this regression test to
+	// first-sync watermark semantics, which is a separate concern.
+	msgsB, err := db.GetMessages("B", 10, "")
+	if err != nil {
+		t.Fatalf("GetMessages B: %v", err)
+	}
+	if len(msgsB) != 1 || msgsB[0].TS != "1700008500.000000" {
+		t.Errorf("B: missing or wrong message; got %+v", msgsB)
+	}
+
+	// C: untouched cache, watermark NOT regressed.
+	msgsC, err := db.GetMessages("C", 10, "")
+	if err != nil {
+		t.Fatalf("GetMessages C: %v", err)
+	}
+	if len(msgsC) != 1 {
+		t.Errorf("C: cache disturbed; got %d msgs", len(msgsC))
+	}
+	if got := db.GetChannelLatestSyncedTS("C"); got != "1690000000.000000" {
+		t.Errorf("C watermark regressed: got %q want %q", got, "1690000000.000000")
+	}
+
+	// C was in the cached-channels set but NOT in the unreads list.
+	// The strongest evidence that the candidate-set logic still
+	// included C (rather than silently dropping it as the
+	// pre-Task-4 ChannelsWithMessages-only path would have done
+	// for an unread-less channel) is that synced_at was bumped by
+	// backfillOneChannel's unconditional SetChannelSyncedAt call.
+	// If C had been excluded from BackfillCandidates entirely,
+	// synced_at would still be 0 (never set by this test's setup).
+	if got := db.GetChannelSyncedAt("C"); got == 0 {
+		t.Errorf("C: synced_at not bumped — channel was skipped by candidate set, not visited")
+	}
+}
+
 // makeBackfillMessages returns n messages with monotonically
 // increasing ts starting from base. Each ts is base + ".000NNN" so
 // they sort correctly as Slack ts strings under lexicographic compare.
