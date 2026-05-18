@@ -105,11 +105,43 @@ func (db *DB) GetChannelReadState(channelID string) (ReadState, error) {
 // channel in the workspace. Single batched query. Called by the
 // sidebar View() at render time.
 func (db *DB) GetWorkspaceReadState(workspaceID string) (map[string]ReadState, error) {
-	return nil, fmt.Errorf("not implemented")
+	rows, err := db.conn.Query(
+		`SELECT id, last_read_ts, has_unread FROM channels WHERE workspace_id = ?`,
+		workspaceID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("query workspace read state: %w", err)
+	}
+	defer rows.Close()
+	out := make(map[string]ReadState)
+	for rows.Next() {
+		var id, lastRead string
+		var hasUnread int
+		if err := rows.Scan(&id, &lastRead, &hasUnread); err != nil {
+			return nil, fmt.Errorf("scan workspace read state: %w", err)
+		}
+		out[id] = ReadState{LastReadTS: lastRead, HasUnread: hasUnread == 1}
+	}
+	return out, rows.Err()
 }
 
 // WorkspacesWithUnreads returns the set of workspace IDs with at least
 // one has_unread=true channel. Used by the workspace rail.
 func (db *DB) WorkspacesWithUnreads() ([]string, error) {
-	return nil, fmt.Errorf("not implemented")
+	rows, err := db.conn.Query(
+		`SELECT DISTINCT workspace_id FROM channels WHERE has_unread = 1`,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("query workspaces with unreads: %w", err)
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan workspace id: %w", err)
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
 }

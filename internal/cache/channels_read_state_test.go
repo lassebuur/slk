@@ -140,3 +140,68 @@ func TestBatchUpdateChannelReadState_Transactional(t *testing.T) {
 		t.Errorf("after empty batch C1 = %+v", s)
 	}
 }
+
+func TestGetWorkspaceReadState_ReturnsAllChannels(t *testing.T) {
+	db, err := New(":memory:")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer db.Close()
+	newRSChannel(t, db, "C1", "T1")
+	newRSChannel(t, db, "C2", "T1")
+	newRSChannel(t, db, "C3", "T1")
+	newRSChannel(t, db, "C4", "T2") // different workspace
+
+	_ = db.UpdateChannelReadState("C1", "1.0001", true)
+	_ = db.UpdateChannelReadState("C2", "1.0002", false)
+	// C3 untouched — defaults
+
+	got, err := db.GetWorkspaceReadState("T1")
+	if err != nil {
+		t.Fatalf("GetWorkspaceReadState: %v", err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("got %d entries, want 3 (C3 must be included with defaults): %+v", len(got), got)
+	}
+	if got["C1"].LastReadTS != "1.0001" || !got["C1"].HasUnread {
+		t.Errorf("C1 = %+v", got["C1"])
+	}
+	if got["C2"].LastReadTS != "1.0002" || got["C2"].HasUnread {
+		t.Errorf("C2 = %+v", got["C2"])
+	}
+	if got["C3"].LastReadTS != "" || got["C3"].HasUnread {
+		t.Errorf("C3 default = %+v", got["C3"])
+	}
+	if _, ok := got["C4"]; ok {
+		t.Errorf("C4 from other workspace should not be returned")
+	}
+}
+
+func TestWorkspacesWithUnreads(t *testing.T) {
+	db, err := New(":memory:")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer db.Close()
+	newRSChannel(t, db, "C1", "T1")
+	newRSChannel(t, db, "C2", "T2")
+	newRSChannel(t, db, "C3", "T3")
+
+	_ = db.UpdateChannelReadState("C1", "1.0", true)
+	_ = db.UpdateChannelReadState("C3", "1.0", true)
+	// C2/T2 has no unreads
+
+	got, err := db.WorkspacesWithUnreads()
+	if err != nil {
+		t.Fatalf("WorkspacesWithUnreads: %v", err)
+	}
+	want := map[string]bool{"T1": true, "T3": true}
+	if len(got) != 2 {
+		t.Fatalf("got %d ids, want 2: %v", len(got), got)
+	}
+	for _, id := range got {
+		if !want[id] {
+			t.Errorf("unexpected workspace %q", id)
+		}
+	}
+}
