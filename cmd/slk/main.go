@@ -1645,33 +1645,23 @@ func connectWorkspace(ctx context.Context, token slackclient.Token, db *cache.DB
 	}
 	log.Printf("workspace %s: %d/%d channel items marked IsMuted after build", token.TeamName, mutedItemCount, len(wctx.Channels))
 
-	// Bootstrap-time unread/mute summary so a user can grep
-	// `[cache] workspace_unread_bootstrap` after launch and see what
-	// slk learned from client.counts vs. what the official Slack
-	// desktop client shows. Only per-channel-detail-log the unread
-	// ones; the muted-vs-unread aggregates are sufficient baseline
-	// for everything else.
+	// Bootstrap-time mute summary so a user can grep
+	// `[cache] workspace_unread_bootstrap` after launch and see how
+	// many channels are muted in this workspace. The per-channel
+	// unread detail log that used to live here was driven by
+	// ChannelItem.UnreadCount, which no longer exists -- unread state
+	// is now sourced exclusively from the read-state DB (see
+	// db.GetChannelReadState) and any equivalent dump would live
+	// alongside the DB write path in updateReadStateFromCounts.
 	if debuglog.Enabled() {
-		var unreadChans, mutedChans, unreadAndUnmuted int
+		var mutedChans int
 		for _, ch := range wctx.Channels {
-			if ch.UnreadCount > 0 {
-				unreadChans++
-				if !ch.IsMuted {
-					unreadAndUnmuted++
-				}
-			}
 			if ch.IsMuted {
 				mutedChans++
 			}
 		}
-		debuglog.Cache("workspace_unread_bootstrap: team=%s total=%d unread_count_>0=%d muted=%d unread_unmuted=%d threads_has_unreads=%v threads_unread=%d",
-			token.TeamName, len(wctx.Channels), unreadChans, mutedChans, unreadAndUnmuted, threadsAgg.HasUnreads, threadsAgg.UnreadCount)
-		for _, ch := range wctx.Channels {
-			if ch.UnreadCount > 0 {
-				debuglog.Cache("workspace_unread_bootstrap: team=%s channel=%s name=%q type=%s unread=%d last_read=%s muted=%v",
-					token.TeamName, ch.ID, ch.Name, ch.Type, ch.UnreadCount, ch.LastReadTS, ch.IsMuted)
-			}
-		}
+		debuglog.Cache("workspace_unread_bootstrap: team=%s total=%d muted=%d threads_has_unreads=%v threads_unread=%d",
+			token.TeamName, len(wctx.Channels), mutedChans, threadsAgg.HasUnreads, threadsAgg.UnreadCount)
 	}
 
 	// Finder items are built alongside the sidebar items in the loop above
@@ -2992,12 +2982,12 @@ func (h *rtmEventHandler) OnConversationOpened(ch slack.Channel) {
 	// Persist in the workspace context so a workspace switch later
 	// shows the new conversation. De-dupe on ID — the same event can
 	// arrive twice (e.g. im_open followed by im_created on first DM).
+	// No read-state preservation is needed: those fields no longer
+	// live on ChannelItem; the read-state DB (per workspace) is the
+	// single source of truth and is unaffected by this in-memory upsert.
 	replaced := false
 	for i := range h.wsCtx.Channels {
 		if h.wsCtx.Channels[i].ID == item.ID {
-			// Preserve unread/last-read from the live context.
-			item.UnreadCount = h.wsCtx.Channels[i].UnreadCount
-			item.LastReadTS = h.wsCtx.Channels[i].LastReadTS
 			h.wsCtx.Channels[i] = item
 			replaced = true
 			break

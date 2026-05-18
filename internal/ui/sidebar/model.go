@@ -26,19 +26,14 @@ const (
 )
 
 type ChannelItem struct {
-	ID            string
-	Name          string
-	Type          string // channel, dm, group_dm, private, app
-	Section       string // section name for grouping (e.g. "Engineering", "Starred")
-	SectionOrder  int    // sort order from config; lower = higher in sidebar (custom sections only)
-	UnreadCount   int
-	IsStarred     bool
-	Presence      string // for DMs: active, away, dnd
-	DMUserID      string // for DMs: the user ID of the other party
-	// LastReadTS is the Slack-format timestamp of the user's last
-	// read marker for this channel ("1700000001.000000"). Used by
-	// the staleness filter; empty means "never read" or "no signal".
-	LastReadTS string
+	ID           string
+	Name         string
+	Type         string // channel, dm, group_dm, private, app
+	Section      string // section name for grouping (e.g. "Engineering", "Starred")
+	SectionOrder int    // sort order from config; lower = higher in sidebar (custom sections only)
+	IsStarred    bool
+	Presence     string // for DMs: active, away, dnd
+	DMUserID     string // for DMs: the user ID of the other party
 	// IsMuted reports whether the user has muted this channel (via
 	// Slack's muted_channels user pref). Muted channels render with a
 	// dimmer foreground and suppress their unread dot; they also do
@@ -206,7 +201,8 @@ type Model struct {
 	// Populated lazily; lookups treat nil as empty. Used in Task 9.
 	collapseByID map[string]bool
 
-	// Staleness filter: items whose LastReadTS is older than
+	// Staleness filter: items whose last_read_ts (from the read-state
+	// DB, fetched via readStateReader in rebuildFilter) is older than
 	// staleThreshold are dropped from `filtered` (i.e. hidden from the
 	// rendered sidebar). 0 disables the feature. activeID names the
 	// channel currently displayed in the message pane and is always
@@ -587,11 +583,11 @@ func (m *Model) SetItems(items []ChannelItem) {
 }
 
 // UpsertItem inserts a new ChannelItem keyed by ID, or updates an existing
-// item in place if the ID is already present. On update, all fields EXCEPT
-// UnreadCount and LastReadTS are overwritten from the supplied item; those
-// two are preserved because Slack's mpim_open / im_created / group_joined
-// payloads do not carry unread state, so clobbering would erase live
-// indicators we want to keep visible.
+// item in place if the ID is already present. On update, all descriptive
+// fields are overwritten from the supplied item. Read state (HasUnread,
+// LastReadTS) is no longer mirrored on ChannelItem -- it lives exclusively
+// in the read-state DB and is read at render time via the readStateReader
+// callback, so there's nothing to preserve here.
 //
 // Re-runs the staleness filter so a freshly-added item (or one whose
 // staleness state may have changed) is reflected in the visible list
@@ -599,12 +595,7 @@ func (m *Model) SetItems(items []ChannelItem) {
 func (m *Model) UpsertItem(item ChannelItem) {
 	for i := range m.items {
 		if m.items[i].ID == item.ID {
-			// Preserve unread/last-read; overwrite descriptive fields.
-			preservedUnread := m.items[i].UnreadCount
-			preservedLastRead := m.items[i].LastReadTS
 			m.items[i] = item
-			m.items[i].UnreadCount = preservedUnread
-			m.items[i].LastReadTS = preservedLastRead
 			m.rebuildFilter()
 			m.rebuildNavPreserveCursor()
 			m.cacheValid = false
@@ -793,6 +784,15 @@ func (m *Model) rebuildFilter() {
 	m.filtered = nil
 	lower := strings.ToLower(m.filter)
 	now := m.now()
+	// Fetch read state once for the whole filter pass so IsStale can
+	// see the same hasUnread/lastReadTS the rest of the sidebar does.
+	// nil-safe: when no reader is installed (early construction, some
+	// tests) every lookup returns the zero value and IsStale's
+	// type-aware empty-LastReadTS branch handles it.
+	var readState map[string]cache.ReadState
+	if m.readStateReader != nil {
+		readState = m.readStateReader()
+	}
 	for i, item := range m.items {
 		if m.filter != "" && !strings.Contains(strings.ToLower(item.Name), lower) {
 			continue
@@ -800,7 +800,8 @@ func (m *Model) rebuildFilter() {
 		// Staleness filter: drop items the user hasn't read in a long
 		// time, with the active channel always exempt so it can't
 		// disappear out from under them.
-		if item.ID != m.activeID && IsStale(item, m.staleThreshold, now) {
+		state := readState[item.ID]
+		if item.ID != m.activeID && IsStale(item, state.HasUnread, state.LastReadTS, m.staleThreshold, now) {
 			continue
 		}
 		m.filtered = append(m.filtered, i)

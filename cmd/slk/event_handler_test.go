@@ -50,16 +50,22 @@ func TestOnConversationOpened_AppendsAndSends(t *testing.T) {
 }
 
 // TestOnConversationOpened_DedupesByID verifies that a re-delivered event for
-// an already-known channel updates the descriptive fields (Name) but preserves
-// live unread state (UnreadCount, LastReadTS). Same-ID Slack events arrive
-// duplicated in practice (e.g. im_open followed by im_created on first DM).
+// an already-known channel updates the descriptive fields (Name) in place
+// instead of double-adding the row. Same-ID Slack events arrive duplicated
+// in practice (e.g. im_open followed by im_created on first DM).
+//
+// Read state used to be mirrored on ChannelItem (UnreadCount, LastReadTS)
+// and required explicit preservation across this upsert. Those fields are
+// gone -- the read-state DB is the single source of truth -- so there's
+// nothing left to assert on that axis here. The descriptive-field
+// overwrite and FinderItems dedupe are the only behaviors that remain.
 func TestOnConversationOpened_DedupesByID(t *testing.T) {
 	wctx := &WorkspaceContext{
 		BotUserIDs:        map[string]bool{},
 		UserNames:         map[string]string{},
 		UserNamesByHandle: map[string]string{"alice": "Alice", "bob": "Bob"},
 		Channels: []sidebar.ChannelItem{
-			{ID: "G1", Name: "old", Type: "group_dm", UnreadCount: 5, LastReadTS: "1700000000.000000"},
+			{ID: "G1", Name: "old", Type: "group_dm"},
 		},
 		// Seed FinderItems so we can assert dedupe doesn't double-add.
 		FinderItems: []channelfinder.Item{
@@ -83,12 +89,6 @@ func TestOnConversationOpened_DedupesByID(t *testing.T) {
 
 	if len(wctx.Channels) != 1 {
 		t.Errorf("len(Channels) = %d, want 1 (deduped on ID)", len(wctx.Channels))
-	}
-	if wctx.Channels[0].UnreadCount != 5 {
-		t.Errorf("UnreadCount = %d, want 5 (preserved across update)", wctx.Channels[0].UnreadCount)
-	}
-	if wctx.Channels[0].LastReadTS != "1700000000.000000" {
-		t.Errorf("LastReadTS = %q, want preserved", wctx.Channels[0].LastReadTS)
 	}
 	if wctx.Channels[0].Name != "Alice, Bob" {
 		t.Errorf("Name = %q, want %q (updated descriptive field)", wctx.Channels[0].Name, "Alice, Bob")

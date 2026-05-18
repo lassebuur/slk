@@ -10,8 +10,8 @@ import (
 
 func TestSidebarView(t *testing.T) {
 	channels := []ChannelItem{
-		{ID: "C1", Name: "general", Type: "channel", UnreadCount: 0},
-		{ID: "C2", Name: "random", Type: "channel", UnreadCount: 3},
+		{ID: "C1", Name: "general", Type: "channel"},
+		{ID: "C2", Name: "random", Type: "channel"},
 		{ID: "C3", Name: "alice", Type: "dm", Presence: "active"},
 	}
 
@@ -246,7 +246,7 @@ func TestUpsertItem_AddsNewChannel(t *testing.T) {
 
 func TestUpsertItem_UpdatesExistingChannel(t *testing.T) {
 	m := New(nil)
-	m.SetItems([]ChannelItem{{ID: "G1", Name: "old name", Type: "group_dm", UnreadCount: 3}})
+	m.SetItems([]ChannelItem{{ID: "G1", Name: "old name", Type: "group_dm"}})
 
 	m.UpsertItem(ChannelItem{ID: "G1", Name: "new name", Type: "group_dm"})
 
@@ -257,12 +257,13 @@ func TestUpsertItem_UpdatesExistingChannel(t *testing.T) {
 	if items[0].Name != "new name" {
 		t.Errorf("Name = %q, want %q", items[0].Name, "new name")
 	}
-	// UnreadCount must be preserved on update — Slack's mpim_open does
-	// not carry unread state, and clobbering a live count to 0 would
-	// erase the indicator we're trying to fix.
-	if items[0].UnreadCount != 3 {
-		t.Errorf("UnreadCount = %d, want 3 (preserved)", items[0].UnreadCount)
-	}
+	// Read state (HasUnread, LastReadTS) used to live on ChannelItem
+	// and needed preservation across upserts because Slack's mpim_open
+	// / im_created / group_joined payloads don't carry it. Those
+	// fields are gone now -- the read-state DB is the single source of
+	// truth -- so there's nothing for UpsertItem to preserve and
+	// nothing to assert here beyond the descriptive-field overwrite
+	// above.
 }
 
 func TestRender_UnreadDMRow_KeepsBoldAfterPrefixReset(t *testing.T) {
@@ -294,7 +295,7 @@ func TestRender_UnreadDMRow_KeepsBoldAfterPrefixReset(t *testing.T) {
 func TestRender_ReadDMRow_DoesNotEmitBoldAfterReset(t *testing.T) {
 	m := New(nil)
 	m.SetItems([]ChannelItem{
-		{ID: "D1", Name: "alice", Type: "dm", Presence: "active", UnreadCount: 0},
+		{ID: "D1", Name: "alice", Type: "dm", Presence: "active"},
 	})
 
 	out := m.View(20, 40)
@@ -376,7 +377,7 @@ func TestRender_ReadThreadsRow_DoesNotEmitBoldAfterReset(t *testing.T) {
 func TestRender_ReadDMRow_RestoresMutedFgAfterPrefixReset(t *testing.T) {
 	m := New(nil)
 	m.SetItems([]ChannelItem{
-		{ID: "D1", Name: "alice", Type: "dm", Presence: "active", UnreadCount: 0},
+		{ID: "D1", Name: "alice", Type: "dm", Presence: "active"},
 	})
 	out := m.View(20, 40)
 
@@ -452,7 +453,7 @@ func TestRender_UnreadDMRow_RestoresBrightFgAfterPrefixReset(t *testing.T) {
 func TestRender_ReadGroupDMRow_RestoresMutedFgAfterPrefixReset(t *testing.T) {
 	m := New(nil)
 	m.SetItems([]ChannelItem{
-		{ID: "G1", Name: "design-trio", Type: "group_dm", UnreadCount: 0},
+		{ID: "G1", Name: "design-trio", Type: "group_dm"},
 	})
 	out := m.View(20, 40)
 
