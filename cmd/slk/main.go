@@ -2008,11 +2008,11 @@ func markChannelReadAsync(
 		return
 	}
 	client := wctx.Client
-	lastReadMap := wctx.LastReadMap
 	go func() {
 		_ = client.MarkChannel(ctx, channelID, ts)
-		_ = db.UpdateLastReadTS(channelID, ts)
-		lastReadMap[channelID] = ts
+		if err := db.UpdateChannelReadState(channelID, ts, false); err != nil {
+			log.Printf("Warning: failed to update read state in markChannelReadAsync %s/%s: %v", channelID, ts, err)
+		}
 		if p != nil {
 			p.Send(ui.ChannelMarkedReadMsg{ChannelID: channelID})
 		}

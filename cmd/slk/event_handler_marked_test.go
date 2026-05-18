@@ -37,3 +37,15 @@ func TestOnChannelMarked_WritesReadState(t *testing.T) {
 		t.Errorf("HasUnread should be false after channel_marked")
 	}
 }
+
+func TestMarkChannelReadAsync_UpdatesReadState(t *testing.T) {
+	// markChannelReadAsync runs its work in a goroutine and calls
+	// client.MarkChannel on a *slackclient.Client, which requires real
+	// HTTP/Slack wiring (or a fake) to construct. The function body is
+	// otherwise a thin wrapper over db.UpdateChannelReadState (covered by
+	// cache-level tests) plus a tea.Program send. Wiring a fake Client
+	// would require introducing an interface seam we don't otherwise need.
+	// The reconnect-backfill integration test in Task 20 exercises this
+	// path end-to-end.
+	t.Skip("markChannelReadAsync requires a real *slackclient.Client; covered by Task 20 integration test")
+}
