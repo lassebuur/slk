@@ -11,6 +11,7 @@ import (
 
 	"charm.land/bubbles/v2/key"
 	"charm.land/lipgloss/v2"
+	"github.com/gammons/slk/internal/text"
 	"github.com/gammons/slk/internal/ui/messages"
 	"github.com/gammons/slk/internal/ui/overlay"
 	"github.com/gammons/slk/internal/ui/styles"
@@ -177,11 +178,11 @@ func (m *Model) handleSearchKey(keyStr string) {
 // against both the key label and the description (case-insensitive substring).
 func (m *Model) filter() {
 	m.filtered = m.filtered[:0]
-	q := strings.ToLower(m.query)
+	q := text.Fold(m.query)
 	for i, e := range m.entries {
 		if q == "" ||
-			strings.Contains(strings.ToLower(e.Desc), q) ||
-			strings.Contains(strings.ToLower(e.Key), q) {
+			strings.Contains(text.Fold(e.Desc), q) ||
+			strings.Contains(text.Fold(e.Key), q) {
 			m.filtered = append(m.filtered, i)
 		}
 	}
