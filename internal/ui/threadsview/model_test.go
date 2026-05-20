@@ -435,3 +435,138 @@ func TestView_BannerVisibleWithSummaries(t *testing.T) {
 		t.Errorf("expected summary content alongside banner, got:\n%s", out)
 	}
 }
+
+// TestClickAt_SelectsCardOnCardRow guards Bug B: clicking on any of
+// the three rows of a thread card must move the selection cursor to
+// that card and return true so the caller can follow up with
+// openSelectedThreadCmd. Layout is cardStride=4 (3 content rows +
+// 1 separator row); card 0 occupies rows [0,1,2], separator at row
+// 3, card 1 at rows [4,5,6], separator at row 7, card 2 at [8,9,10].
+func TestClickAt_SelectsCardOnCardRow(t *testing.T) {
+	m := New(map[string]string{}, "USELF")
+	m.SetSummaries(sampleSummaries())
+
+	// Click row 5 — middle row of card 1. Should select card 1.
+	if !m.ClickAt(5) {
+		t.Fatal("ClickAt(5) returned false; want true (row inside card 1)")
+	}
+	if got := m.SelectedIndex(); got != 1 {
+		t.Errorf("after ClickAt(5) SelectedIndex = %d, want 1", got)
+	}
+
+	// Click row 0 — first row of card 0. Should select card 0.
+	if !m.ClickAt(0) {
+		t.Fatal("ClickAt(0) returned false; want true (row inside card 0)")
+	}
+	if got := m.SelectedIndex(); got != 0 {
+		t.Errorf("after ClickAt(0) SelectedIndex = %d, want 0", got)
+	}
+}
+
+// TestClickAt_SeparatorRowIsNoop ensures a click on the blank line
+// between cards is ignored (no selection movement, returns false).
+func TestClickAt_SeparatorRowIsNoop(t *testing.T) {
+	m := New(map[string]string{}, "USELF")
+	m.SetSummaries(sampleSummaries())
+	m.MoveDown() // selected = 1
+
+	// Row 3 is the separator between card 0 and card 1.
+	if m.ClickAt(3) {
+		t.Fatal("ClickAt(3) returned true on separator row; want false")
+	}
+	if got := m.SelectedIndex(); got != 1 {
+		t.Errorf("separator click should not move selection; got %d, want 1", got)
+	}
+}
+
+// TestClickAt_OutOfRangeIsNoop guards clicks on the blank-fill area
+// below the last card and on the negative-y region. Both return
+// false and leave selection alone.
+func TestClickAt_OutOfRangeIsNoop(t *testing.T) {
+	m := New(map[string]string{}, "USELF")
+	m.SetSummaries(sampleSummaries())
+	// Two cards: last card occupies up to row 6 (card 1 = rows 4,5,6).
+	// Row 50 is well past the list.
+	if m.ClickAt(50) {
+		t.Errorf("ClickAt(50) returned true; want false (past last card)")
+	}
+	if m.ClickAt(-1) {
+		t.Errorf("ClickAt(-1) returned true; want false (negative y)")
+	}
+	if got := m.SelectedIndex(); got != 0 {
+		t.Errorf("out-of-range click moved selection: got %d, want 0", got)
+	}
+}
+
+// TestClickAt_AccountsForBannerRow guards that the
+// "Threads list unavailable" banner offsets the body by one row.
+// With banner shown, paneY=0 is the banner (no-op) and paneY=1 maps
+// to the first card row.
+func TestClickAt_AccountsForBannerRow(t *testing.T) {
+	m := New(map[string]string{}, "USELF")
+	m.SetSummaries(sampleSummaries())
+	m.SetSubscriptionsAvailable(false)
+	m.MoveDown() // selected = 1, so the banner-aware test starts away from 0
+
+	if m.ClickAt(0) {
+		t.Errorf("ClickAt(0) on banner returned true; want false")
+	}
+	if got := m.SelectedIndex(); got != 1 {
+		t.Errorf("banner click moved selection: got %d, want 1", got)
+	}
+	// With banner reserved, paneY=1 is the first row of card 0.
+	if !m.ClickAt(1) {
+		t.Fatal("ClickAt(1) with banner returned false; want true (row 0 of card 0)")
+	}
+	if got := m.SelectedIndex(); got != 0 {
+		t.Errorf("after ClickAt(1) with banner SelectedIndex = %d, want 0", got)
+	}
+}
+
+// TestClickAt_AccountsForYOffset guards that ClickAt respects the
+// current viewport scroll: rowY refers to a position in the visible
+// window, not an absolute line in the flat list. Driving yOffset via
+// moving the selection cursor past the viewport bottom (View() will
+// snap yOffset down to keep the selected card visible).
+func TestClickAt_AccountsForYOffset(t *testing.T) {
+	m := New(map[string]string{}, "USELF")
+	sums := []cache.ThreadSummary{
+		{ChannelID: "C1", ChannelName: "g1", ThreadTS: "1.0", ParentText: "a", LastReplyTS: "2.0", LastReplyBy: "U2"},
+		{ChannelID: "C2", ChannelName: "g2", ThreadTS: "2.0", ParentText: "b", LastReplyTS: "3.0", LastReplyBy: "U2"},
+		{ChannelID: "C3", ChannelName: "g3", ThreadTS: "3.0", ParentText: "c", LastReplyTS: "4.0", LastReplyBy: "U2"},
+	}
+	m.SetSummaries(sums)
+	// 3 cards = 11 flat lines; viewport height = 5 forces snap to
+	// scroll once we move past card 0.
+	m.MoveDown()
+	m.MoveDown() // selected = 2 (last card)
+	_ = m.View(5, 80)
+
+	// yOffset is now non-zero (snapped to keep card 2 visible).
+	// Card 2 starts at absolute line 8 with cardContentLines=3, so
+	// to fit content end (line 10) inside a 5-row viewport,
+	// yOffset = end - height = 11 - 5 = 6. Within the viewport,
+	// card 2's first row is at viewport row 8 - 6 = 2.
+	if !m.ClickAt(2) {
+		t.Fatalf("ClickAt(2) on card 2 (with yOffset=%d) returned false; want true", m.yOffset)
+	}
+	if got := m.SelectedIndex(); got != 2 {
+		t.Errorf("ClickAt(2) with yOffset set: SelectedIndex = %d, want 2", got)
+	}
+
+	// And the rowY=0 click should select card 1 (whose first row is
+	// at absolute line 4, which maps to viewport row 4 - 6 = -2 —
+	// so actually card 1 is OFF-screen; rowY=0 corresponds to
+	// absolute line yOffset + 0 = 6, which lies inside card 1's
+	// separator/footer region. Let's check by computing the actual
+	// row mapping using cardStride math:
+	//   absLine = yOffset + 0 = 6
+	//   6 % 4 = 2 (< cardContentLines=3) → card row
+	//   idx = 6 / 4 = 1 → card 1, row 2 (footer)
+	if !m.ClickAt(0) {
+		t.Fatalf("ClickAt(0) at yOffset=%d returned false; want true (card 1 footer)", m.yOffset)
+	}
+	if got := m.SelectedIndex(); got != 1 {
+		t.Errorf("ClickAt(0) at yOffset=6 should select card 1; got %d", got)
+	}
+}

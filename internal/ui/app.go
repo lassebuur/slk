@@ -1144,6 +1144,21 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		} else if x < a.layoutMsgEnd {
 			a.focusedPanel = PanelMessages
+			// In the threads-list view, the messages-pane region
+			// renders threadsView, not the channel messages. Route
+			// the click through threadsView.ClickAt so the cursor
+			// follows the click, then open the highlighted thread
+			// (mirrors the mouse-wheel branch above and the j/k/Enter
+			// paths). The messagepane drag-selection / reaction /
+			// image-hit-test code below operates on the (hidden)
+			// channel pane and must not run here.
+			if a.view == ViewThreads {
+				panel, _, py, ok := a.panelAt(msg.X, msg.Y)
+				if ok && panel == PanelMessages && py >= 0 && a.threadsView.ClickAt(py) {
+					return a, a.openSelectedThreadCmd(false)
+				}
+				break
+			}
 			panel, px, py, ok := a.panelAt(msg.X, msg.Y)
 			if ok && panel == PanelMessages && py >= 0 {
 				// Hit-test reactions and inline images first: a click
@@ -3783,6 +3798,33 @@ func (a *App) handleEnter() tea.Cmd {
 				return ChannelSelectedMsg{ID: item.ID, Name: item.Name, Type: item.Type}
 			}
 		}
+	}
+
+	// In the threads-list view, the messages-pane region renders the
+	// threadsView model instead of the channel's message history.
+	// focusedPanel stays at PanelMessages (we re-use that panel slot),
+	// so handleEnter must explicitly route to the highlighted thread
+	// here — otherwise the PanelMessages block below falls through to
+	// messagepane.SelectedMessage() and opens whatever was highlighted
+	// in the underlying channel. Enter also shifts keyboard focus to
+	// the thread pane (mirroring the channel-pane Enter semantics:
+	// "enter this thread to interact with it"), distinguishing it
+	// from the j/k navigation which preserves PanelMessages focus so
+	// the user can keep walking the list.
+	if a.focusedPanel == PanelMessages && a.view == ViewThreads {
+		if _, ok := a.threadsView.SelectedSummary(); !ok {
+			return nil
+		}
+		// Force the open even when openSelectedThreadCmd would
+		// otherwise dedup (because j/k or activation already loaded
+		// this thread): the user explicitly asked to enter it. We
+		// reset the dedup keys so the helper runs its full open
+		// path, then re-set focus to the thread pane.
+		a.lastOpenedChannelID = ""
+		a.lastOpenedThreadTS = ""
+		cmd := a.openSelectedThreadCmd(false)
+		a.focusedPanel = PanelThread
+		return cmd
 	}
 
 	if a.focusedPanel == PanelMessages {

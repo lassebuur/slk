@@ -690,6 +690,149 @@ func TestApp_HandleEnterOnThreadsRowActivatesView(t *testing.T) {
 	}
 }
 
+// TestApp_ClickOnThreadInThreadsViewOpensIt guards Bug B: a left-click
+// on a thread card in the threads-list view must select that card AND
+// open the corresponding thread. Before the fix, the messages-pane
+// click branch unconditionally drove a.messagepane.BeginSelectionAt /
+// ClickAt — which has no effect on the (hidden) channel messages pane
+// while in ViewThreads, leaving the threads-view selection and the
+// thread panel untouched.
+func TestApp_ClickOnThreadInThreadsViewOpensIt(t *testing.T) {
+	a := NewApp()
+	a.width = 160
+	a.height = 30
+	a.activeTeamID = "T1"
+	// Force layout to populate layoutSidebarEnd / layoutMsgEnd.
+	_ = a.View()
+	if a.layoutMsgEnd <= a.layoutSidebarEnd {
+		t.Fatalf("layout not populated after View(); sidebarEnd=%d msgEnd=%d",
+			a.layoutSidebarEnd, a.layoutMsgEnd)
+	}
+
+	fetchedCh := ""
+	fetchedTS := ""
+	a.SetThreadFetcher(func(channelID, threadTS string) tea.Msg {
+		fetchedCh = channelID
+		fetchedTS = threadTS
+		return ThreadRepliesLoadedMsg{ThreadTS: threadTS, Replies: nil}
+	})
+	summaries := []cache.ThreadSummary{
+		{ChannelID: "C_A", ThreadTS: "1.0", ParentTS: "1.0", ParentText: "alpha"},
+		{ChannelID: "C_B", ThreadTS: "2.0", ParentTS: "2.0", ParentText: "bravo"},
+	}
+	// SubscriptionsAvailable=true so the banner row isn't reserved
+	// above the list, keeping the row math simple.
+	a.Update(ThreadsListLoadedMsg{TeamID: "T1", Summaries: summaries, SubscriptionsAvailable: true})
+	// Enter the threads view. This selects summary 0 and opens it.
+	a.Update(ThreadsViewActivatedMsg{})
+	if a.view != ViewThreads {
+		t.Fatalf("precondition: view = %v, want ViewThreads", a.view)
+	}
+
+	// Re-render so layout reflects ViewThreads.
+	_ = a.View()
+
+	// Click in the messages-pane horizontal zone, on row Y=5. The
+	// messages pane has a 1-row top border, so paneY = 4. With
+	// cardStride=4 and cardContentLines=3, absLine=4 lies on the
+	// first row of card 1 (rows 0-2 = card 0, row 3 = separator,
+	// rows 4-6 = card 1).
+	clickX := a.layoutSidebarEnd + 5 // anywhere inside the msg pane zone
+	clickY := 5
+	fetchedCh, fetchedTS = "", ""
+	_, cmd := a.Update(tea.MouseClickMsg{X: clickX, Y: clickY, Button: tea.MouseLeft})
+	if cmd == nil {
+		t.Fatal("click in threads view returned nil cmd; expected an open-thread fetch")
+	}
+	_ = drainBatch(cmd)
+
+	if got := a.threadsView.SelectedIndex(); got != 1 {
+		t.Errorf("click did not move threadsView selection: SelectedIndex = %d, want 1", got)
+	}
+	if fetchedCh != "C_B" || fetchedTS != "2.0" {
+		t.Errorf("click fetched (ch=%q, ts=%q); want (C_B, 2.0)", fetchedCh, fetchedTS)
+	}
+	if a.threadPanel.ChannelID() != "C_B" || a.threadPanel.ThreadTS() != "2.0" {
+		t.Errorf("thread panel opened (ch=%q, ts=%q); want (C_B, 2.0)",
+			a.threadPanel.ChannelID(), a.threadPanel.ThreadTS())
+	}
+}
+
+// TestApp_HandleEnterInThreadsViewOpensSelectedThread guards Bug A:
+// while the user is in the threads-list view, pressing Enter must
+// open the thread highlighted in `threadsView`, NOT the message
+// highlighted in the (hidden) channel messages pane. The threads view
+// runs with focusedPanel == PanelMessages — without an explicit
+// `view == ViewThreads` branch in handleEnter, the PanelMessages
+// block fell through to messagepane.SelectedMessage() and opened
+// whatever was selected in the underlying channel.
+func TestApp_HandleEnterInThreadsViewOpensSelectedThread(t *testing.T) {
+	app := NewApp()
+	app.activeTeamID = "T1"
+	app.activeChannelID = "C_CHANNEL"
+
+	fetchedCh := ""
+	fetchedTS := ""
+	app.SetThreadFetcher(func(channelID, threadTS string) tea.Msg {
+		fetchedCh = channelID
+		fetchedTS = threadTS
+		return ThreadRepliesLoadedMsg{ThreadTS: threadTS, Replies: nil}
+	})
+
+	// Seed the channel messages pane with a message highlighted at
+	// index 0. This is the "wrong" target Enter used to open.
+	app.messagepane.SetMessages([]messages.MessageItem{
+		{TS: "9999.0", UserID: "U1", Text: "channel msg", ThreadTS: ""},
+	})
+
+	// Seed the threads view with two summaries and select the SECOND
+	// one. This is what Enter must open.
+	summaries := []cache.ThreadSummary{
+		{ChannelID: "C_THREADA", ThreadTS: "1.0", ParentTS: "1.0"},
+		{ChannelID: "C_THREADB", ThreadTS: "2.0", ParentTS: "2.0"},
+	}
+	_, _ = app.Update(ThreadsListLoadedMsg{TeamID: "T1", Summaries: summaries})
+	app.threadsView.MoveDown() // select the second summary
+
+	// Activate the threads view (sets view=ViewThreads,
+	// focusedPanel=PanelMessages). Discard the activation cmd; we
+	// drive handleEnter directly below.
+	_, _ = app.Update(ThreadsViewActivatedMsg{})
+
+	cmd := app.handleEnter()
+	if cmd == nil {
+		t.Fatal("handleEnter returned nil in ViewThreads")
+	}
+	// Drain the tea.Batch — fetcher invocations record into
+	// fetchedCh/fetchedTS.
+	msg := cmd()
+	switch m := msg.(type) {
+	case tea.BatchMsg:
+		for _, c := range m {
+			if c != nil {
+				_ = c()
+			}
+		}
+	}
+
+	if fetchedCh != "C_THREADB" || fetchedTS != "2.0" {
+		t.Fatalf("Enter in ViewThreads fetched (ch=%q, ts=%q); want (C_THREADB, 2.0). It is opening the wrong thread (likely the channel's selected message).",
+			fetchedCh, fetchedTS)
+	}
+	if app.threadPanel.ChannelID() != "C_THREADB" || app.threadPanel.ThreadTS() != "2.0" {
+		t.Errorf("thread panel opened (ch=%q, ts=%q); want (C_THREADB, 2.0)",
+			app.threadPanel.ChannelID(), app.threadPanel.ThreadTS())
+	}
+	// Enter on a thread should also move keyboard focus into the
+	// thread pane, mirroring channel-pane Enter semantics ("enter
+	// this thread to interact with it"). This distinguishes Enter
+	// from j/k which preserve PanelMessages focus for further list
+	// navigation.
+	if app.focusedPanel != PanelThread {
+		t.Errorf("after Enter in ViewThreads, focusedPanel = %v, want PanelThread", app.focusedPanel)
+	}
+}
+
 func TestApp_OpenSelectedThreadDedups(t *testing.T) {
 	app := NewApp()
 	app.activeTeamID = "T1"

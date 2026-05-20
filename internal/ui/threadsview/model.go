@@ -327,6 +327,51 @@ func (m *Model) ScrollDown(n int) {
 	m.dirty()
 }
 
+// ClickAt selects the thread card whose visual row contains rowY, where
+// rowY is the panel-local Y coordinate inside the bordered messages-pane
+// content area (i.e. paneY as returned by App.panelAt: top border already
+// stripped). Returns true when a card was selected and the caller should
+// follow up with the open-thread command; false for clicks on the
+// "Threads list unavailable" banner row, on inter-card separator rows,
+// on the blank-fill region past the last card, and for negative rowY.
+//
+// Layout reference: the body is rendered by renderRows which emits
+// cardContentLines (3) rows per card with one blank separator row between
+// adjacent cards — so cardStride is 4 and card i starts at absolute line
+// i*cardStride. When subscriptionsAvailable=false, View prepends a single
+// banner row above the body, so rowY=0 is the banner and the body starts
+// at rowY=1. yOffset is added to rowY (after banner adjustment) to map
+// from viewport coordinates to absolute line index.
+func (m *Model) ClickAt(rowY int) bool {
+	if rowY < 0 {
+		return false
+	}
+	bodyY := rowY
+	if !m.subscriptionsAvailable {
+		if bodyY == 0 {
+			return false // banner row
+		}
+		bodyY--
+	}
+	absLine := m.yOffset + bodyY
+	if absLine < 0 {
+		return false
+	}
+	// Inter-card separator rows have absLine % cardStride == cardContentLines.
+	if absLine%cardStride >= cardContentLines {
+		return false
+	}
+	idx := absLine / cardStride
+	if idx < 0 || idx >= len(m.summaries) {
+		return false
+	}
+	if m.selected != idx {
+		m.selected = idx
+		m.dirty()
+	}
+	return true
+}
+
 // MarkSelectedRead clears the local Unread flag on the currently selected
 // summary, if any. Returns true when a flag was actually flipped (so callers
 // can refresh dependent state, e.g. the sidebar's threads-row badge). This
