@@ -383,6 +383,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.drag,
 		a.typing,
 		a.bootstrap,
+		reduceReactions,
 	); handled {
 		if cmd != nil {
 			cmds = append(cmds, cmd)
@@ -1423,21 +1424,8 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.CloseThread()
 		}
 
-	case ReactionAddedMsg:
-		// Skip WebSocket echo of our own optimistic updates.
-		// When we add/remove a reaction, we update the UI immediately.
-		// The WebSocket echo arrives later with our own userID — ignore it.
-		if msg.UserID != a.currentUserID {
-			a.updateReactionOnMessage(msg.ChannelID, msg.MessageTS, msg.Emoji, msg.UserID, false)
-		}
-
-	case ReactionRemovedMsg:
-		if msg.UserID != a.currentUserID {
-			a.updateReactionOnMessage(msg.ChannelID, msg.MessageTS, msg.Emoji, msg.UserID, true)
-		}
-
-	case ReactionSentMsg:
-		// API call completed. If err, optimistic update stays (could add status bar error later).
+	// ReactionAddedMsg, ReactionRemovedMsg, ReactionSentMsg moved
+	// to reduceReactions (Phase 4g, reducer_reactions.go).
 
 	case ChannelMarkedReadMsg:
 		debuglog.Cache("ChannelMarkedReadMsg: channel=%s active=%s (optimistic clear)",

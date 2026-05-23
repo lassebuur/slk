@@ -42,6 +42,21 @@ type reducer interface {
 	Handle(a *App, msg tea.Msg) (tea.Cmd, bool)
 }
 
+// reducerFunc adapts a plain function with the reducer signature
+// into the reducer interface. Used by the free reducer files
+// (reducer_reactions.go, reducer_threads.go, ...) so they don't
+// need a wrapper struct just to satisfy the interface — the
+// per-file `var reduceXxx reducerFunc = func(...) {...}` literal
+// reads as a single unit.
+//
+// Mirrors net/http's HandlerFunc adapter.
+type reducerFunc func(a *App, msg tea.Msg) (tea.Cmd, bool)
+
+// Handle satisfies the reducer interface.
+func (f reducerFunc) Handle(a *App, msg tea.Msg) (tea.Cmd, bool) {
+	return f(a, msg)
+}
+
 // dispatchReducers tries each reducer in order; returns (cmd, true)
 // at the first handler that owns msg, or (nil, false) when no
 // reducer claimed it.
