@@ -58,7 +58,7 @@ var modeHandlers = map[Mode]modeHandler{
 	ModeThemeSwitcher:        (*App).handleThemeSwitcherMode,
 	ModePresenceMenu:         (*App).handlePresenceMenuMode,
 	ModePresenceCustomSnooze: (*App).handlePresenceCustomSnoozeMode,
-	ModeHelp:                 (*App).handleHelpMode,
+	ModeHelp:                 handleHelpMode,
 }
 
 // dispatchModeKey looks up the handler for the App's current

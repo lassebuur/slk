@@ -1033,28 +1033,7 @@ func (a *App) handleThemeSwitcherMode(msg tea.KeyMsg) tea.Cmd {
 	return nil
 }
 
-// handleHelpMode dispatches key events to the help overlay and tears down
-// the mode when the overlay closes itself (esc/q/?).
-func (a *App) handleHelpMode(msg tea.KeyMsg) tea.Cmd {
-	keyStr := msg.String()
-	switch msg.Key().Code {
-	case tea.KeyEnter:
-		keyStr = "enter"
-	case tea.KeyEscape:
-		keyStr = "esc"
-	case tea.KeyUp:
-		keyStr = "up"
-	case tea.KeyDown:
-		keyStr = "down"
-	case tea.KeyBackspace:
-		keyStr = "backspace"
-	}
-	a.help.HandleKey(keyStr)
-	if !a.help.IsVisible() {
-		a.SetMode(ModeNormal)
-	}
-	return nil
-}
+// handleHelpMode moved to mode_help.go (Phase 5c).
 
 func (a *App) handlePresenceMenuMode(msg tea.KeyMsg) tea.Cmd {
 	keyStr := msg.String()
