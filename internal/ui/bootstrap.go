@@ -24,6 +24,9 @@
 package ui
 
 import (
+	"time"
+
+	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
 	"github.com/gammons/slk/internal/ui/styles"
@@ -135,6 +138,56 @@ func (b *workspaceBootstrap) checkDone() {
 	}
 	// All failed (and none ready): dismiss anyway.
 	b.loading = false
+}
+
+// spinnerTickCmd schedules the next SpinnerTickMsg 100ms out.
+// Used by the SpinnerTickMsg arm to keep the chain alive while
+// either the bootstrap overlay or the messages pane is loading.
+func spinnerTickCmd() tea.Cmd {
+	return tea.Tick(100*time.Millisecond, func(time.Time) tea.Msg {
+		return SpinnerTickMsg{}
+	})
+}
+
+// Handle is the bootstrap-family reducer for App.Update (Phase 4e).
+// Owns SpinnerTickMsg (advance the shared spinner frame + reschedule
+// while loading), LoadingTimeoutMsg (force-dismiss the overlay) and
+// WorkspaceFailedMsg (flip a single workspace's status to failed).
+// Returns (nil, false) for any other message type.
+//
+// WorkspaceReadyMsg deliberately does NOT route through here even
+// though it calls bootstrap.MarkReady / ClaimInitialActive: that
+// arm is a 60-line workspace-activation orchestrator (sidebar,
+// threadsView, messagepane, threadPanel, compose, channelFinder,
+// statusbar, workspaceRail, themes, presence, channels) whose
+// bootstrap-related side effects are a small fraction of what it
+// does. It belongs in reducer_workspace.go (Phase 4k).
+//
+// The shared spinner frame (a.spinnerFrame, a.messagepane spinner)
+// is touched via `a` because it's also driven by messages-pane
+// loading state, not just by the bootstrap overlay.
+func (b *workspaceBootstrap) Handle(a *App, msg tea.Msg) (tea.Cmd, bool) {
+	switch m := msg.(type) {
+	case SpinnerTickMsg:
+		_ = m
+		if !(b.IsLoading() || a.messagepane.IsLoading()) {
+			// Neither loader is active anymore; let the chain die.
+			return nil, true
+		}
+		a.spinnerFrame = (a.spinnerFrame + 1) % len(styles.SpinnerChars)
+		a.messagepane.SetSpinnerFrame(a.spinnerFrame)
+		return spinnerTickCmd(), true
+
+	case LoadingTimeoutMsg:
+		_ = m
+		b.TimeoutPendingAsFailed()
+		return nil, true
+
+	case WorkspaceFailedMsg:
+		b.MarkFailed(m.TeamName)
+		return nil, true
+	}
+	return nil, false
 }
 
 // Render builds the centered overlay box for the given canvas size.

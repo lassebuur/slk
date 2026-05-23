@@ -382,6 +382,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.preview,
 		a.drag,
 		a.typing,
+		a.bootstrap,
 	); handled {
 		if cmd != nil {
 			cmds = append(cmds, cmd)
@@ -1596,17 +1597,8 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.SetChannelMembership(msg.ChannelID, msg.MemberIDs)
 		return a, nil
 
-	case SpinnerTickMsg:
-		if a.bootstrap.IsLoading() || a.messagepane.IsLoading() {
-			a.spinnerFrame = (a.spinnerFrame + 1) % len(styles.SpinnerChars)
-			a.messagepane.SetSpinnerFrame(a.spinnerFrame)
-			return a, tea.Tick(100*time.Millisecond, func(time.Time) tea.Msg {
-				return SpinnerTickMsg{}
-			})
-		}
-
-	case LoadingTimeoutMsg:
-		a.bootstrap.TimeoutPendingAsFailed()
+	// SpinnerTickMsg, LoadingTimeoutMsg moved to
+	// workspaceBootstrap.Handle (Phase 4e).
 
 	case WorkspaceReadyMsg:
 		a.bootstrap.MarkReady(msg.TeamName)
@@ -1715,8 +1707,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.channelFinder.SetBrowseable(msg.Items)
 		}
 
-	case WorkspaceFailedMsg:
-		a.bootstrap.MarkFailed(msg.TeamName)
+	// WorkspaceFailedMsg moved to workspaceBootstrap.Handle (Phase 4e).
 
 	// UserTypingMsg, TypingExpiredMsg moved to typingTracker.Handle
 	// (Phase 4d). PresenceChangeMsg, StatusChangeMsg,
