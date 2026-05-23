@@ -12,7 +12,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"strconv"
 	"strings"
 	"time"
 
@@ -1075,33 +1074,7 @@ func (a *App) handlePresenceMenuMode(msg tea.KeyMsg) tea.Cmd {
 	return nil
 }
 
-func (a *App) handlePresenceCustomSnoozeMode(msg tea.KeyMsg) tea.Cmd {
-	switch msg.Key().Code {
-	case tea.KeyEscape:
-		a.presence.ClearSnoozeBuf()
-		a.SetMode(ModeNormal)
-		return nil
-	case tea.KeyEnter:
-		mins, err := strconv.Atoi(a.presence.SnoozeBuf())
-		a.presence.ClearSnoozeBuf()
-		a.SetMode(ModeNormal)
-		if err != nil || mins <= 0 {
-			a.statusbar.SetToast("Invalid snooze duration")
-			return tea.Tick(2*time.Second, func(time.Time) tea.Msg { return statusbar.CopiedClearMsg{} })
-		}
-		st := a.presence.Apply(a.activeTeamID, presencemenu.ActionSnooze, mins)
-		a.statusbar.SetStatus(st.Presence, st.DNDEnabled, st.DNDEndTS)
-		if a.setStatusFn != nil {
-			a.setStatusFn(presencemenu.ActionSnooze, mins)
-		}
-		return nil
-	case tea.KeyBackspace:
-		a.presence.BackspaceSnooze()
-		return nil
-	}
-	a.presence.AppendSnoozeDigit(msg.String())
-	return nil
-}
+// handlePresenceCustomSnoozeMode moved to mode_presence_snooze.go (Phase 5d).
 
 func (a *App) handleReactionPickerMode(msg tea.KeyMsg) tea.Cmd {
 	keyStr := msg.String()
