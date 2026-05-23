@@ -1,7 +1,7 @@
 # internal/ui/app.go SOLID Refactor — Implementation Plan
 
-> **Status:** Phases 0–5 complete (10 state extractions + 4 service interfaces + 12 reducer migrations + 11 mode-handler extractions). Phases 6–7 ahead.
-> **Branch:** `refactor/app-phase-2-extract-state-objects` (tip carries Phases 2+3+4+5; earlier phases on their own branches off main).
+> **Status:** Phases 0–6 complete (10 state extractions + 4 service interfaces + 12 reducer migrations + 11 mode-handler extractions + 8 View region extractions). Phase 7 remains (deferred; lowest priority).
+> **Branch:** `refactor/app-phase-2-extract-state-objects` (tip carries Phases 2+3+4+5+6; earlier phases on their own branches off main).
 > **Working baseline:** `f2defed` (main as of the rebase, includes upstream wheel-scroll + click-to-thread changes).
 
 **Goal:** Apply SOLID principles to the 6,200-line God Object that is `internal/ui/app.go`. The `App` struct previously held ~95 fields and ~120 methods spanning at least a dozen unrelated concerns (mouse FSM, image preview overlay, navigation history, typing indicators, presence/DND, edit state, ...). Reduce App's surface area, separate concerns into self-contained collaborators, and prepare the file for further structural work (reducer split, mode-handler strategy, View region split).
@@ -23,16 +23,17 @@ Confirmed before Phase 0:
 
 ## Running tally vs original baseline
 
-| | Original | After Phase 2 | After Phase 3 | After Phase 4 | After Phase 5 | Δ from original |
-|---|---|---|---|---|---|---|
-| `app.go` lines | 6,216 | 5,099 | 4,920 | 3,434 | **2,733** | **−3,483 (−56.0%)** |
-| `Update` body lines | ~1,571 | ~1,571 | ~1,571 | ~85 | ~85 | **−1,486 (−94.6%)** |
-| `handleKey` mode switch | ~24 lines | ~24 | ~24 | ~24 | **1** (single map lookup) | **−23 (−95.8%)** |
-| `handle*Mode` methods on App | 11 (~700 lines) | 11 | 11 | 11 | **0** | all moved to per-mode files |
-| `App` struct fields | ~95 | ~60 | ~40 | ~40 | ~40 | ~−55, consolidated into 10 controllers + 4 service interfaces |
-| `App` callback `Set*` methods | ~28 | ~28 | 4 | 4 | 4 | **−24** (24 collapsed into 4 service setters) |
-| main.go wiring calls | ~40 | ~40 | ~20 | ~20 | ~20 | **−20** |
-| Cohesive new files under `internal/ui/` | 0 | 12 | 14 | 22 | **34** | + mode_handlers.go + 11 mode_*.go + test shim (Phase 5) |
+| | Original | After Phase 2 | After Phase 3 | After Phase 4 | After Phase 5 | After Phase 6 | Δ from original |
+|---|---|---|---|---|---|---|---|
+| `app.go` lines | 6,216 | 5,099 | 4,920 | 3,434 | 2,733 | **2,349** | **−3,867 (−62.2%)** |
+| `Update` body lines | ~1,571 | ~1,571 | ~1,571 | ~85 | ~85 | ~85 | **−1,486 (−94.6%)** |
+| `View` body lines | ~432 | ~432 | ~432 | ~432 | ~432 | **~50** | **−382 (−88.4%)** |
+| `handleKey` mode switch | ~24 lines | ~24 | ~24 | ~24 | 1 | 1 | **−23 (−95.8%)** |
+| `handle*Mode` methods on App | 11 (~700 lines) | 11 | 11 | 11 | 0 | 0 | all moved to per-mode files |
+| `App` struct fields | ~95 | ~60 | ~40 | ~40 | ~40 | ~40 | ~−55, consolidated into 10 controllers + 4 service interfaces |
+| `App` callback `Set*` methods | ~28 | ~28 | 4 | 4 | 4 | 4 | **−24** (24 collapsed into 4 service setters) |
+| main.go wiring calls | ~40 | ~40 | ~20 | ~20 | ~20 | ~20 | **−20** |
+| Cohesive new files under `internal/ui/` | 0 | 12 | 14 | 22 | 34 | **43** | + view_helpers.go + 8 view_*.go (Phase 6) |
 
 ---
 
@@ -389,44 +390,108 @@ func (a *App) handleKey(msg tea.KeyMsg) tea.Cmd {
 
 ## Phase 6 — View region split
 
-**Goal:** Extract per-region renderers from `View()` (~470 lines) so View becomes ~80 lines of composition.
+**Goal:** Extract per-region renderers from `View()` (~432 lines) so View becomes a short composition.
 
-**Status:** **NOT STARTED.**
+**Status:** **COMPLETE** — 9 sub-phases (6a–6i) over commits `836bb54..8cd340e`.
 
-**Per-region functions (rough sketch):**
+### Phase 6 design choices (decided at start)
 
-- `(a *App) renderRail(width, height int) string`
-- `(a *App) renderSidebar(width, height int) string`
-- `(a *App) renderMessagesRegion(frame panelLayoutFrame) string` — handles both ViewChannels and ViewThreads
-- `(a *App) renderThreadRegion(frame panelLayoutFrame) string`
-- `(a *App) renderStatusbar(width int) string`
-- `(a *App) renderComposeRow(width int) string`
-- `(a *App) renderTypingRow(width int) string`
+1. **One file per region** (e.g. `view_rail.go`, `view_messages.go`). Mirrors the `mode_*.go` pattern from Phase 5 and the `reducer_*.go` pattern from Phase 4. Each file owns one cohesive region; grep affordance for "which file renders X."
+2. **Methods on `App`, not free functions.** Unlike Phase 4 reducers and Phase 5 mode handlers, the View region renderers touch a lot of App state (`a.messagepane`, `a.threadPanel`, `a.compose`, `a.threadCompose`, `a.renderCache.*`, `a.layout`, `a.preview`, etc.). The receiver form (`func (a *App) renderRail(...)`) keeps the call sites in `View()` short and reads naturally. No test-shim file is needed because no tests reference these methods directly.
+3. **Bench after every sub-phase.** View is the hottest code path. Each sub-phase ran `BenchmarkAppViewCompose` + `BenchmarkAppViewIdle` with `-count=3 -benchtime=3s`. Any steady-state regression >5% beyond noise would have stopped the phase to investigate.
 
-View becomes a composition:
+### Phase 6 summary table
+
+| Sub | Region / Concern | Commit | Δ app.go | Notes |
+|---|---|---|---|---|
+| 6a | `exactSize` / `exactSizeBg` helpers → `view_helpers.go` | `836bb54` | −10 | Mechanism: hoist 2 inline closures to free functions so per-region renderers in view_*.go can call them without the View-scoped closure context. Dropped now-unused `image/color` import. |
+| 6b | `renderEarlyFallback` → `view_early.go` | `5a94421` | −18 | Pre-measurement fallback for unmeasured terminals. `(tea.View, bool)` return mirrors `dispatchReducers`'s claim-pattern. |
+| 6c | `applyOverlays` + `maybeWrapFinalScreen` → `view_overlays.go` | `e04b787` | −64 | 7 overlay branches + presence-snooze + bootstrap + the conservative final-screen wrapper. Preserved verbatim the perf rationale for skipping the wrapper when no overlay is active (~3.4ms/frame, the prior profile's largest cost). |
+| 6d | `renderStatusRow` → `view_status.go` | `6af698e` | −14 | Cached status row (rail-spacer + statusbar). `themeVer` threaded through as parameter so View remains the canonical "snapshot theme once" site. |
+| 6e | `renderRail` → `view_rail.go` | `20260c7` | −10 | Cached workspace rail with RailBackground. |
+| 6f | `renderSidebar` → `view_sidebar.go` | `4fbb0e7` | −33 | Cached sidebar with rounded/thick border + SidebarBackground panel color. `SetFocused` ordering preserved. |
+| 6g | `renderMessagesRegion` + 2 sub-helpers → `view_messages.go` | `e6a7a54` | −150 | Largest. Two top-level branches (ViewThreads vs ViewChannels) split into `renderThreadsViewPanel` + `renderChannelMessagesPanel` + `renderMessagesTop` for the cached-top portion. Preserved the split-cache rationale (per-keystroke cost note) verbatim in the file header. |
+| 6h | `renderThreadRegion` + sub-helper → `view_thread.go` | `7631cf0` | −68 | Same split-cache pattern as messages (cached top, fresh bottom). |
+| 6i | `renderPreviewPanel` → `view_preview.go` + local-var cleanup | `8cd340e` | −37 | Smallest region. Cleanup pass also collapsed the per-pane `contentHeight := frame.ContentHeight, msgWidth := frame.MsgWidth, ...` destructuring at the top of View into direct `frame.X` accessors at call sites; the locals were redundant after every consumer became a helper. |
+| — | **Totals** | — | **−404** | View body shrank from 432 lines to 50 |
+
+### Files added during Phase 6
+
+- `internal/ui/view_helpers.go` (43 lines) — `exactSize` / `exactSizeBg` primitives
+- `internal/ui/view_early.go` (42)
+- `internal/ui/view_overlays.go` (101)
+- `internal/ui/view_status.go` (36)
+- `internal/ui/view_rail.go` (33)
+- `internal/ui/view_sidebar.go` (70)
+- `internal/ui/view_messages.go` (234) — largest
+- `internal/ui/view_thread.go` (114)
+- `internal/ui/view_preview.go` (30)
+
+### Patterns that emerged during Phase 6
+
+1. **Methods on App, not free functions.** Phase 4 reducers and Phase 5 mode handlers used the free-function form because their dispatchers needed function values for the chain/map. View region renderers have no such dispatch indirection — `View()` calls them directly. Method form keeps the call sites short.
+
+2. **`themeVer` threaded through as a parameter.** Each region's cache layout key mixes `themeVer` (the snapshot of `styles.Version()`) into the cache key. Threading it through as a parameter from View instead of re-reading inside each helper keeps a single canonical snapshot point — every region in one frame sees the same theme version.
+
+3. **Side-effect ordering preserved verbatim.** Several region renderers have `SetFocused` calls that MUST run before the panel-cache hit-check (SetFocused bumps the model's Version, and the cache key includes Version). Each migrated helper preserves the original ordering with a comment explaining why.
+
+4. **Cache-keyed sub-helper for the "cached top" of split-rendered panels.** Both `renderChannelMessagesPanel` (Phase 6g) and `renderThreadRegion` (Phase 6h) use the same split-cache pattern: a bordered top region cached on the pane's Version + a fresh bottom region (typing + compose) rendered each frame. The cached-top portion was extracted into its own helper (`renderMessagesTop`, `renderThreadTop`) so the `panelCache` hit/store triple lives next to the cache field rather than buried inside the larger orchestrator.
+
+5. **Verbatim preservation of perf rationale.** Every multi-line `PERF:`/`NOTE:` comment block in the original View body was preserved verbatim in the new file's header. This phase touched the hottest code path; the original comments documented hard-won perf wins (split rendering, skipping the final-screen wrapper, threadsView.Version snapshot ordering) that future readers MUST understand before changing.
+
+### Verification after Phase 6
+
+- `go vet ./...` clean · `go build ./...` clean
+- 39/39 packages green, 24/24 in `internal/ui/...`
+- View benchmarks (3-iteration steady-state, after each sub-phase):
+  - `BenchmarkAppViewCompose ~4.80ms` (Phase 5 baseline ~4.81ms; no regression)
+  - `BenchmarkAppViewIdle ~1.90ms` (Phase 5 baseline ~1.90ms; unchanged)
+- No sub-phase showed a regression beyond run-to-run noise.
+
+### Final shape of `App.View`
 
 ```go
 func (a *App) View() tea.View {
-    // early-out for unmeasured terminal (loading-overlay fallback)
-    if a.width == 0 || a.height == 0 { ... }
+    if v, handled := a.renderEarlyFallback(); handled {
+        return v
+    }
+    frame := a.layout.Compute(a.width, a.height, a.workspaceRail.Width(), a.sidebar.Width(), a.sidebarVisible, a.threadVisible)
+    if frame.ThreadAutoHidden {
+        a.threadVisible = false
+        if a.focusedPanel == PanelThread {
+            a.focusedPanel = PanelMessages
+        }
+    }
+    themeVer := styles.Version()
+    previewActive := a.preview.Active()
 
-    frame := a.layout.Compute(...)
-    if frame.ThreadAutoHidden { ... }
+    var panels []string
+    panels = append(panels, a.renderRail(frame.RailWidth, frame.ContentHeight, themeVer))
+    if a.sidebarVisible {
+        panels = append(panels, a.renderSidebar(frame.SidebarWidth, frame.SidebarBorder, frame.ContentHeight, themeVer))
+    }
+    if s := a.renderMessagesRegion(frame, themeVer, previewActive); s != "" {
+        panels = append(panels, s)
+    }
+    if a.threadVisible && frame.ThreadWidth > 0 && !previewActive {
+        panels = append(panels, a.renderThreadRegion(frame, themeVer))
+    }
+    if previewActive {
+        panels = append(panels, a.renderPreviewPanel(frame))
+    }
 
-    rail     := a.renderRail(frame.RailWidth, frame.ContentHeight)
-    sidebar  := a.renderSidebar(frame.SidebarWidth, frame.ContentHeight)
-    msgRegion := a.renderMessagesRegion(frame)
-    threadRegion := a.renderThreadRegion(frame)
-    statusbar := a.renderStatusbar(a.width - frame.RailWidth)
-
-    content := lipgloss.JoinHorizontal(...)
-    return tea.NewView(lipgloss.JoinVertical(content, statusbar))
+    content := lipgloss.JoinHorizontal(lipgloss.Top, panels...)
+    status := a.renderStatusRow(frame.RailWidth, a.width-frame.RailWidth, themeVer)
+    screen := lipgloss.JoinVertical(lipgloss.Left, content, status)
+    screen = a.applyOverlays(screen)
+    v := tea.NewView(a.maybeWrapFinalScreen(screen))
+    v.AltScreen = true
+    v.MouseMode = tea.MouseModeCellMotion
+    return v
 }
 ```
 
-**Pre-condition:** The View benchmark (`BenchmarkAppViewCompose`/`BenchmarkAppViewIdle`) must stay healthy through this phase. Each extraction step should run the benchmark and compare to the Phase 2 baseline.
-
-**Expected gain:** View readable in a single screen. Per-region renderers are independently testable (golden-string tests at fixed widths/heights).
+50 lines including the early-fallback guard, layout-compute + ThreadAutoHidden side-effect, the 5 per-region append calls, the status-row join, the overlay stack, and the final tea.NewView wrap.
 
 ---
 
@@ -512,10 +577,20 @@ main (f2defed = merged #26 scroll improvements)
         ├── 46a9475  phase 5i — ReactionPicker mode
         ├── 17aadca  phase 5j — Confirm mode (amended via rebase)
         ├── 685e127  phase 5k — Normal mode
-        └── b7f45b0  phase 5l — Insert mode (final)
+        ├── b7f45b0  phase 5l — Insert mode (final)
+        ├── ee73236  docs — phase 5 complete
+        ├── 836bb54  phase 6a — exact-size view helpers
+        ├── 5a94421  phase 6b — renderEarlyFallback
+        ├── e04b787  phase 6c — overlay stack + final-screen wrapper
+        ├── 6af698e  phase 6d — status row renderer
+        ├── 20260c7  phase 6e — rail renderer
+        ├── 4fbb0e7  phase 6f — sidebar renderer
+        ├── e6a7a54  phase 6g — messages region renderer (largest)
+        ├── 7631cf0  phase 6h — thread region renderer
+        └── 8cd340e  phase 6i — preview overlay panel renderer (final)
 ```
 
-Phase 4f was deliberately skipped (see Phase 4 summary table for rationale). Phase 0/1 branches still point to their pre-rebase commits. If they need to be PR'd separately to main, re-rebase them onto current main first. The tip branch's name is now stale (it carries Phases 2+3+4+5, ~42 commits) but the contents are unambiguous.
+Phase 4f was deliberately skipped (see Phase 4 summary table for rationale). Phase 0/1 branches still point to their pre-rebase commits. If they need to be PR'd separately to main, re-rebase them onto current main first. The tip branch's name is now stale (it carries Phases 2+3+4+5+6, ~51 commits) but the contents are unambiguous.
 
 ---
 
@@ -527,4 +602,4 @@ If picking this up in a new session:
 2. `git fetch origin && git log --oneline HEAD..origin/main` — check for upstream drift.
 3. If there are new commits on main, rebase: `git rebase origin/main`. The conflict surface for any future drift is concentrated in `app.go`'s remaining handler bodies and the per-reducer files in `internal/ui/reducer_*.go`; an upstream change that added a new message arm would land in the `Update` switch where the matching reducer's `Handle` method now is.
 4. Read this doc + skim the most recent phase's commit message for context.
-5. Pick the next phase from the "NOT STARTED" set above. **Phase 6 (View region split)** is the natural continuation — `View()` is ~470 lines of composition logic that can be broken into per-region renderers (rail, sidebar, messages, thread, statusbar, compose, typing). Phase 7 (Primitive Obsession / ID types) is the other remaining item; it touches every package boundary so it's lowest priority.
+5. Pick the next phase from the "NOT STARTED" set above. **Phase 7 (Primitive Obsession / ID types)** is the only remaining phase. It's deferred for the reasons listed in the Phase 7 section (touches every package boundary; the safety win is real but small for TUI-internal ID strings). Whether to pursue it is a separate decision; the structural refactor goals (Phases 0–6) are achieved.
