@@ -16,6 +16,7 @@ import (
 	imgpkg "github.com/gammons/slk/internal/image"
 	"github.com/gammons/slk/internal/ui/imgrender"
 	"github.com/gammons/slk/internal/ui/messages"
+	"github.com/gammons/slk/internal/ui/scrollbar"
 	"github.com/gammons/slk/internal/ui/selection"
 	"github.com/gammons/slk/internal/ui/styles"
 )
@@ -132,8 +133,6 @@ type Model struct {
 	chromeCacheValid    bool
 	chromeWidth         int
 	chromeReplyCount    int
-	chromeParentTS      string
-	chromeParentText    string
 	chromeUserNamesV    uint64 // version of the userNames map at build time
 	chromeChannelNamesV uint64 // version of the channelNames map at build time
 
@@ -173,6 +172,13 @@ type Model struct {
 	// SetUnreadBoundary, typically with the parent channel's last_read_ts
 	// at the moment the thread is opened.
 	unreadBoundaryTS string
+
+	// snappedSelection lets View() avoid re-snapping vp.YOffset back to the
+	// selected reply on every render. While snappedSelection == selected,
+	// mouse-wheel / programmatic scrolls (ScrollUp/ScrollDown) are preserved
+	// across renders -- mirrors the same convention used by messages.Model.
+	snappedSelection int
+	hasSnapped       bool
 
 	// version increments on every state change that could alter View() output.
 	version int64
@@ -593,21 +599,34 @@ func (m *Model) SelectByIndex(i int) {
 
 // MoveUp moves the selection cursor up one reply.
 // ScrollUp scrolls the thread viewport up by n lines without changing the
-// selected reply.
+// selected reply. Marks the current selection as already-snapped so View()
+// won't pull the viewport back to keep selection visible on the next render.
 func (m *Model) ScrollUp(n int) {
 	if n > 0 {
 		m.vp.ScrollUp(n)
+		m.snappedSelection = m.selected
+		m.hasSnapped = true
 		m.dirty()
 	}
 }
 
 // ScrollDown scrolls the thread viewport down by n lines without changing the
-// selected reply.
+// selected reply. Marks the current selection as already-snapped so View()
+// won't pull the viewport back on the next render.
 func (m *Model) ScrollDown(n int) {
 	if n > 0 {
 		m.vp.ScrollDown(n)
+		m.snappedSelection = m.selected
+		m.hasSnapped = true
 		m.dirty()
 	}
+}
+
+// ViewportAtTop reports whether the thread viewport is scrolled to the top.
+// Used by the app layer to detect a wheel-up / PageUp that hit the top of the
+// reply stream (cosmetic only -- no thread backfill exists today).
+func (m *Model) ViewportAtTop() bool {
+	return m.vp.YOffset() == 0
 }
 
 func (m *Model) MoveUp() {
@@ -1129,13 +1148,15 @@ func (m *Model) View(height, width int) string {
 	// infrequently — chrome is rebuilt rarely, so the comparison cost is
 	// negligible and invalidation discipline is easier to get wrong.
 	chromeReplyCount := len(m.replies)
-	parentTS := m.parent.TS
-	parentText := m.parent.Text
+	// Chrome no longer contains the parent message -- the parent now lives
+	// at the top of m.viewContent so it scrolls with the replies (a long
+	// parent must not pin and block the reply area). Chrome is only the
+	// header line + a single border separator; everything else moved into
+	// the viewport, so parent identity no longer participates in the
+	// chrome cache key.
 	if !m.chromeCacheValid ||
 		m.chromeWidth != width ||
 		m.chromeReplyCount != chromeReplyCount ||
-		m.chromeParentTS != parentTS ||
-		m.chromeParentText != parentText ||
 		m.chromeUserNamesV != m.userNamesV ||
 		m.chromeChannelNamesV != m.channelNamesV {
 		replyLabel := "replies"
@@ -1153,18 +1174,11 @@ func (m *Model) View(height, width int) string {
 			Background(styles.Background).
 			Foreground(styles.Border).
 			Render(strings.Repeat("-", width))
-		// v1: discard parent flushes — parent attachments are rare
-		// in the chrome-cached path and threading kitty flushes through
-		// the chromeCache lifecycle adds complexity. Reply flushes are
-		// captured below in the per-reply cache loop.
-		parentContent, _, _ := m.renderThreadMessage(m.parent, width, m.userNames, m.channelNames, false)
-		m.chromeCache = header + "\n" + separator + "\n" + parentContent + "\n" + separator
+		m.chromeCache = header + "\n" + separator
 		m.chromeHeight = lipgloss.Height(m.chromeCache)
 		m.chromeCacheValid = true
 		m.chromeWidth = width
 		m.chromeReplyCount = chromeReplyCount
-		m.chromeParentTS = parentTS
-		m.chromeParentText = parentText
 		m.chromeUserNamesV = m.userNamesV
 		m.chromeChannelNamesV = m.channelNamesV
 	}
@@ -1180,14 +1194,48 @@ func (m *Model) View(height, width int) string {
 	}
 	m.lastViewHeight = replyAreaHeight
 
+	// Render the parent message once -- it now lives at the top of the
+	// scrollable viewContent (chrome only carries the header + separator).
+	// We discard the parent's image flushes and reaction-hit rects in v1:
+	// parent attachments are rare and threading flushes through the cache
+	// lifecycle adds complexity; reply flushes and hit rects ARE captured
+	// in the per-reply loop below.
+	parentContent, _, _ := m.renderThreadMessage(m.parent, width, m.userNames, m.channelNames, false)
+	parentSeparator := lipgloss.NewStyle().
+		Width(width).
+		Background(styles.Background).
+		Foreground(styles.Border).
+		Render(strings.Repeat("─", width))
+	parentBlock := parentContent + "\n" + parentSeparator
+	parentBlockHeight := lipgloss.Height(parentBlock)
+
 	if len(m.replies) == 0 {
+		emptyHeight := replyAreaHeight - parentBlockHeight
+		if emptyHeight < 1 {
+			emptyHeight = 1
+		}
 		empty := lipgloss.NewStyle().
 			Width(width).
-			Height(replyAreaHeight).
+			Height(emptyHeight).
 			Background(styles.Background).
 			Foreground(styles.TextMuted).
 			Render("No replies yet")
-		result := chrome + "\n" + empty
+		// Push parent + placeholder through the viewport so a parent
+		// taller than the pane still scrolls. The scrollbar overlay
+		// reflects the parent's own height.
+		emptyContent := parentBlock + "\n" + empty
+		emptyTotalLines := lipgloss.Height(emptyContent)
+		m.vp.SetWidth(width)
+		m.vp.SetHeight(replyAreaHeight)
+		m.vp.KeyMap = viewport.KeyMap{}
+		m.vp.SetContent(emptyContent)
+		visibleLines := strings.Split(m.vp.View(), "\n")
+		visibleLines = scrollbar.Overlay(
+			visibleLines, width,
+			emptyTotalLines, m.vp.YOffset(), replyAreaHeight,
+			styles.Background, styles.Border, styles.Primary,
+		)
+		result := chrome + "\n" + strings.Join(visibleLines, "\n")
 		return lipgloss.NewStyle().Width(width).Height(height).MaxHeight(height).Background(styles.Background).Render(result)
 	}
 
@@ -1309,10 +1357,16 @@ func (m *Model) View(height, width int) string {
 		}
 		landmarkInserted := false
 
-		var allRows []string
+		// viewContent begins with the parent message block so the parent
+		// scrolls together with the replies. entryOffsets / selectedStartLine
+		// / m.totalLines are built in parent-inclusive coordinates from here
+		// on -- the snap-to-selection math and reaction-hit translation
+		// both index into viewContent and so naturally account for the
+		// parent prefix without further adjustment.
+		allRows := []string{parentBlock}
 		startLine := 0
 		endLine := 0
-		currentLine := 0
+		currentLine := parentBlockHeight
 		// kittyFlushBuf collects per-image kitty APC upload bytes for
 		// every cached entry (the thread cache holds only the open
 		// thread's replies — typically a handful — so we don't bother
@@ -1404,12 +1458,20 @@ func (m *Model) View(height, width int) string {
 	m.vp.KeyMap = viewport.KeyMap{}
 	m.vp.SetContent(m.viewContent)
 
-	// Scroll to keep selected item visible
-	if m.selectedEndLine > m.vp.YOffset()+m.vp.Height() {
-		m.vp.SetYOffset(m.selectedEndLine - m.vp.Height())
-	}
-	if m.selectedStartLine < m.vp.YOffset() {
-		m.vp.SetYOffset(m.selectedStartLine)
+	// Scroll to keep selected item visible -- but only when the selection
+	// has actually changed since the last snap. This lets the mouse wheel
+	// (or programmatic ScrollUp/Down) move the viewport away from the
+	// selected reply without the next render yanking it back. Mirrors the
+	// same guard used in messages.Model.View().
+	if !m.hasSnapped || m.snappedSelection != m.selected {
+		if m.selectedEndLine > m.vp.YOffset()+m.vp.Height() {
+			m.vp.SetYOffset(m.selectedEndLine - m.vp.Height())
+		}
+		if m.selectedStartLine < m.vp.YOffset() {
+			m.vp.SetYOffset(m.selectedStartLine)
+		}
+		m.snappedSelection = m.selected
+		m.hasSnapped = true
 	}
 
 	// Populate the per-frame reaction-hit slice in pane-local
@@ -1462,7 +1524,16 @@ func (m *Model) View(height, width int) string {
 		m.vp.SetContent(m.applySelectionOverlay(m.viewContent))
 	}
 
-	result := chrome + "\n" + m.vp.View()
+	// Scrollbar overlay on the right edge of the scrollable area. Chrome
+	// (header + separator) is left alone since it does not scroll. Same
+	// pattern as messages.Model.View().
+	visibleLines := strings.Split(m.vp.View(), "\n")
+	visibleLines = scrollbar.Overlay(
+		visibleLines, width,
+		m.totalLines, m.vp.YOffset(), replyAreaHeight,
+		styles.Background, styles.Border, styles.Primary,
+	)
+	result := chrome + "\n" + strings.Join(visibleLines, "\n")
 	return lipgloss.NewStyle().Width(width).Height(height).MaxHeight(height).Background(styles.Background).Render(result)
 }
 
