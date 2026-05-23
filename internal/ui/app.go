@@ -882,8 +882,8 @@ func (a *App) maybeFetchOlderHistory(atTop bool) tea.Cmd {
 	}
 	a.fetchingOlder = true
 	a.messagepane.SetLoading(true)
-	chID := a.activeChannelID
-	oldestTS := a.messagepane.OldestTS()
+	chID := ids.ChannelID(a.activeChannelID)
+	oldestTS := ids.MessageTS(a.messagepane.OldestTS())
 	channels := a.channels
 	// Kick the spinner tick: if a.loading is already false (workspace
 	// fully loaded), no tick is alive and the glyph would freeze on its

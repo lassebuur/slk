@@ -14,6 +14,8 @@ package ui
 
 import (
 	tea "charm.land/bubbletea/v2"
+
+	"github.com/gammons/slk/internal/ids"
 )
 
 func handleChannelFinderMode(a *App, msg tea.KeyMsg) tea.Cmd {
@@ -52,7 +54,7 @@ func handleChannelFinderMode(a *App, msg tea.KeyMsg) tea.Cmd {
 			}
 		}
 		channels := a.channels
-		id, name := result.ID, result.Name
+		id, name := ids.ChannelID(result.ID), result.Name
 		return func() tea.Msg {
 			return channels.Join(id, name)
 		}

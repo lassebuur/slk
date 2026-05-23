@@ -347,50 +347,50 @@ type ChannelService interface {
 	// Fetch loads the most-recent messages for channelID from Slack.
 	// channelName is for log context. Returns a tea.Msg (typically
 	// MessagesLoadedMsg).
-	Fetch(channelID, channelName string) tea.Msg
+	Fetch(channelID ids.ChannelID, channelName string) tea.Msg
 
 	// FetchOlder loads messages older than oldestTS for the
 	// channel-history backfill triggered by scroll-past-top.
 	// Returns a tea.Msg (typically OlderMessagesLoadedMsg).
-	FetchOlder(channelID, oldestTS string) tea.Msg
+	FetchOlder(channelID ids.ChannelID, oldestTS ids.MessageTS) tea.Msg
 
 	// ReadCache returns the local-cache snapshot of channelID's
 	// recent messages, or nil if no cache exists. Used by
 	// ChannelSelectedMsg's tiered render policy.
-	ReadCache(channelID string) []messages.MessageItem
+	ReadCache(channelID ids.ChannelID) []messages.MessageItem
 
 	// SyncedAt returns the unix-seconds timestamp of the channel's
 	// last authoritative cache-from-network sync, or 0 if never
 	// synced. Used by ChannelSelectedMsg's tiered render policy to
 	// decide between cache-only, cache-and-verify, and spinner-only
 	// render.
-	SyncedAt(channelID string) int64
+	SyncedAt(channelID ids.ChannelID) int64
 
 	// MarkRead dispatches conversations.mark + UpdateChannelReadState
 	// to bring the channel's last_read_ts up to ts. Used by Tier 1
 	// of ChannelSelectedMsg when cache is provably fresh. Returns
 	// a tea.Msg (typically ChannelMarkedReadMsg).
-	MarkRead(channelID, ts string) tea.Msg
+	MarkRead(channelID ids.ChannelID, ts ids.MessageTS) tea.Msg
 
 	// Lookup returns metadata (name, channelType) for channelID, or
 	// ok=false if the channel is no longer available in the active
 	// workspace. Used by navHistoryStore.Walk to skip stale entries.
-	Lookup(channelID string) (name, channelType string, ok bool)
+	Lookup(channelID ids.ChannelID) (name, channelType string, ok bool)
 
 	// Join sends conversations.join for channelID. channelName is
 	// for log context. Returns a tea.Msg (typically ChannelJoinedMsg
 	// or ChannelJoinFailedMsg).
-	Join(channelID, channelName string) tea.Msg
+	Join(channelID ids.ChannelID, channelName string) tea.Msg
 
 	// RecordVisit persists a visit to channelID (SQLite write +
 	// WorkspaceContext last-visited map update). Fired once per
 	// ChannelSelectedMsg regardless of FromHistory.
-	RecordVisit(channelID string)
+	RecordVisit(channelID ids.ChannelID)
 
 	// MembershipFetch asks membership.Manager to ensure-fresh the
 	// member set for channelID. Fire-and-forget; results arrive
 	// asynchronously via ChannelMembershipMsg.
-	MembershipFetch(channelID string)
+	MembershipFetch(channelID ids.ChannelID)
 }
 
 // ChannelServiceFuncs is the closure bundle accepted by
@@ -400,12 +400,12 @@ type ChannelServiceFuncs struct {
 	Fetch           ChannelFetchFunc
 	FetchOlder      OlderMessagesFetchFunc
 	ReadCache       ChannelCacheReadFunc
-	SyncedAt        func(channelID string) int64
-	MarkRead        func(channelID, ts string) tea.Msg
+	SyncedAt        func(channelID ids.ChannelID) int64
+	MarkRead        func(channelID ids.ChannelID, ts ids.MessageTS) tea.Msg
 	Lookup          ChannelLookupFunc
 	Join            JoinChannelFunc
 	RecordVisit     ChannelVisitRecorder
-	MembershipFetch func(channelID string)
+	MembershipFetch func(channelID ids.ChannelID)
 }
 
 // NewChannelService builds a ChannelService from a
@@ -422,63 +422,63 @@ type channelAdapter struct {
 	fns ChannelServiceFuncs
 }
 
-func (c channelAdapter) Fetch(channelID, channelName string) tea.Msg {
+func (c channelAdapter) Fetch(channelID ids.ChannelID, channelName string) tea.Msg {
 	if c.fns.Fetch == nil {
 		return nil
 	}
 	return c.fns.Fetch(channelID, channelName)
 }
 
-func (c channelAdapter) FetchOlder(channelID, oldestTS string) tea.Msg {
+func (c channelAdapter) FetchOlder(channelID ids.ChannelID, oldestTS ids.MessageTS) tea.Msg {
 	if c.fns.FetchOlder == nil {
 		return nil
 	}
 	return c.fns.FetchOlder(channelID, oldestTS)
 }
 
-func (c channelAdapter) ReadCache(channelID string) []messages.MessageItem {
+func (c channelAdapter) ReadCache(channelID ids.ChannelID) []messages.MessageItem {
 	if c.fns.ReadCache == nil {
 		return nil
 	}
 	return c.fns.ReadCache(channelID)
 }
 
-func (c channelAdapter) SyncedAt(channelID string) int64 {
+func (c channelAdapter) SyncedAt(channelID ids.ChannelID) int64 {
 	if c.fns.SyncedAt == nil {
 		return 0
 	}
 	return c.fns.SyncedAt(channelID)
 }
 
-func (c channelAdapter) MarkRead(channelID, ts string) tea.Msg {
+func (c channelAdapter) MarkRead(channelID ids.ChannelID, ts ids.MessageTS) tea.Msg {
 	if c.fns.MarkRead == nil {
 		return nil
 	}
 	return c.fns.MarkRead(channelID, ts)
 }
 
-func (c channelAdapter) Lookup(channelID string) (name, channelType string, ok bool) {
+func (c channelAdapter) Lookup(channelID ids.ChannelID) (name, channelType string, ok bool) {
 	if c.fns.Lookup == nil {
 		return "", "", false
 	}
 	return c.fns.Lookup(channelID)
 }
 
-func (c channelAdapter) Join(channelID, channelName string) tea.Msg {
+func (c channelAdapter) Join(channelID ids.ChannelID, channelName string) tea.Msg {
 	if c.fns.Join == nil {
 		return nil
 	}
 	return c.fns.Join(channelID, channelName)
 }
 
-func (c channelAdapter) RecordVisit(channelID string) {
+func (c channelAdapter) RecordVisit(channelID ids.ChannelID) {
 	if c.fns.RecordVisit == nil {
 		return
 	}
 	c.fns.RecordVisit(channelID)
 }
 
-func (c channelAdapter) MembershipFetch(channelID string) {
+func (c channelAdapter) MembershipFetch(channelID ids.ChannelID) {
 	if c.fns.MembershipFetch == nil {
 		return
 	}

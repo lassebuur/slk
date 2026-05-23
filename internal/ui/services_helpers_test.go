@@ -16,7 +16,11 @@
 // binary.
 package ui
 
-import tea "charm.land/bubbletea/v2"
+import (
+	tea "charm.land/bubbletea/v2"
+
+	"github.com/gammons/slk/internal/ids"
+)
 
 func (a *App) setThreadFetcherForTest(fn ThreadFetchFunc) {
 	a.SetThreadService(NewThreadService(ThreadServiceFuncs{Fetch: fn}))
@@ -48,7 +52,7 @@ func (a *App) setChannelFetcherForTest(fn ChannelFetchFunc) {
 	a.SetChannelService(NewChannelService(fns))
 }
 
-func (a *App) setChannelReadMarkerForTest(fn func(channelID, ts string) tea.Msg) {
+func (a *App) setChannelReadMarkerForTest(fn func(channelID ids.ChannelID, ts ids.MessageTS) tea.Msg) {
 	fns := channelFuncsForTest(a)
 	fns.MarkRead = fn
 	a.SetChannelService(NewChannelService(fns))
@@ -60,7 +64,7 @@ func (a *App) setChannelCacheReaderForTest(fn ChannelCacheReadFunc) {
 	a.SetChannelService(NewChannelService(fns))
 }
 
-func (a *App) setChannelSyncedAtReaderForTest(fn func(channelID string) int64) {
+func (a *App) setChannelSyncedAtReaderForTest(fn func(channelID ids.ChannelID) int64) {
 	fns := channelFuncsForTest(a)
 	fns.SyncedAt = fn
 	a.SetChannelService(NewChannelService(fns))
@@ -84,7 +88,7 @@ func (a *App) setChannelVisitRecorderForTest(fn ChannelVisitRecorder) {
 	a.SetChannelService(NewChannelService(fns))
 }
 
-func (a *App) setChannelMembershipFetcherForTest(fn func(channelID string)) {
+func (a *App) setChannelMembershipFetcherForTest(fn func(channelID ids.ChannelID)) {
 	fns := channelFuncsForTest(a)
 	fns.MembershipFetch = fn
 	a.SetChannelService(NewChannelService(fns))

@@ -856,27 +856,29 @@ func run() error {
 		})
 
 		app.SetChannelService(ui.NewChannelService(ui.ChannelServiceFuncs{
-			RecordVisit: func(channelID string) {
+			RecordVisit: func(channelID ids.ChannelID) {
+				chIDStr := string(channelID)
 				wctx := router.Active()
 				if wctx == nil {
 					return
 				}
-				wctx.LastVisitedByChannel[channelID] = time.Now().Unix()
+				wctx.LastVisitedByChannel[chIDStr] = time.Now().Unix()
 				teamID := wctx.TeamID
 				go func() {
-					if err := db.RecordChannelVisit(teamID, channelID); err != nil {
-						log.Printf("warning: recording channel visit %s/%s: %v", teamID, channelID, err)
+					if err := db.RecordChannelVisit(teamID, chIDStr); err != nil {
+						log.Printf("warning: recording channel visit %s/%s: %v", teamID, chIDStr, err)
 					}
 				}()
 			},
-			Lookup: func(channelID string) (string, string, bool) {
+			Lookup: func(channelID ids.ChannelID) (string, string, bool) {
+				chIDStr := string(channelID)
 				wctx := router.Active()
 				if wctx == nil {
 					return "", "", false
 				}
 				// Sidebar (joined channels + Slack-native sections).
 				for _, ch := range wctx.Channels {
-					if ch.ID == channelID {
+					if ch.ID == chIDStr {
 						return ch.Name, ch.Type, true
 					}
 				}
@@ -884,23 +886,23 @@ func run() error {
 				// that aren't in the sidebar pre-conversation, and any
 				// browseable public channels.
 				for _, it := range wctx.FinderItems {
-					if it.ID == channelID {
+					if it.ID == chIDStr {
 						return it.Name, it.Type, true
 					}
 				}
 				return "", "", false
 			},
-			ReadCache: func(channelID string) []messages.MessageItem {
+			ReadCache: func(channelID ids.ChannelID) []messages.MessageItem {
 				wctx := router.Active()
 				if wctx == nil {
 					return nil
 				}
-				return loadCachedMessages(db, wctx.Client.UserID(), channelID, wctx.UserNames, tsFormat, router)
+				return loadCachedMessages(db, wctx.Client.UserID(), string(channelID), wctx.UserNames, tsFormat, router)
 			},
-			SyncedAt: func(channelID string) int64 {
-				return db.GetChannelSyncedAt(channelID)
+			SyncedAt: func(channelID ids.ChannelID) int64 {
+				return db.GetChannelSyncedAt(string(channelID))
 			},
-			MembershipFetch: func(channelID string) {
+			MembershipFetch: func(channelID ids.ChannelID) {
 				wctx := router.Active()
 				if wctx == nil || wctx.Membership == nil {
 					return
@@ -913,56 +915,59 @@ func run() error {
 				// reason (see app.go ChannelSelectedMsg handler) — we can
 				// call EnsureFresh synchronously here because we're already
 				// off the Update goroutine.
-				wctx.Membership.EnsureFresh(context.Background(), channelID)
+				wctx.Membership.EnsureFresh(context.Background(), string(channelID))
 			},
-			Fetch: func(channelID, channelName string) tea.Msg {
+			Fetch: func(channelID ids.ChannelID, channelName string) tea.Msg {
+				chIDStr := string(channelID)
 				wctx := router.Active()
 				if wctx == nil {
 					return nil
 				}
-				msgItems := fetchChannelMessages(wctx.Client, channelID, db, wctx.UserNames, tsFormat, avatarCache, router)
+				msgItems := fetchChannelMessages(wctx.Client, chIDStr, db, wctx.UserNames, tsFormat, avatarCache, router)
 
-				state, _ := db.GetChannelReadState(channelID)
+				state, _ := db.GetChannelReadState(chIDStr)
 				lastReadTS := state.LastReadTS
 
 				// Mark channel as read up to the latest message
 				if len(msgItems) > 0 {
 					latestTS := msgItems[len(msgItems)-1].TS
-					markChannelReadAsync(ctx, wctx, db, p, channelID, latestTS)
+					markChannelReadAsync(ctx, wctx, db, p, chIDStr, latestTS)
 				}
 
 				return ui.MessagesLoadedMsg{
-					ChannelID:  channelID,
+					ChannelID:  chIDStr,
 					Messages:   msgItems,
 					LastReadTS: lastReadTS,
 				}
 			},
-			MarkRead: func(channelID, ts string) tea.Msg {
+			MarkRead: func(channelID ids.ChannelID, ts ids.MessageTS) tea.Msg {
 				wctx := router.Active()
-				markChannelReadAsync(ctx, wctx, db, p, channelID, ts)
+				markChannelReadAsync(ctx, wctx, db, p, string(channelID), string(ts))
 				return nil // ChannelMarkedReadMsg is emitted from inside the goroutine
 			},
-			FetchOlder: func(channelID, oldestTS string) tea.Msg {
+			FetchOlder: func(channelID ids.ChannelID, oldestTS ids.MessageTS) tea.Msg {
+				chIDStr := string(channelID)
 				wctx := router.Active()
 				if wctx == nil {
 					return nil
 				}
-				msgItems := fetchOlderMessages(wctx.Client, channelID, oldestTS, db, wctx.UserNames, tsFormat, avatarCache, router)
+				msgItems := fetchOlderMessages(wctx.Client, chIDStr, string(oldestTS), db, wctx.UserNames, tsFormat, avatarCache, router)
 				return ui.OlderMessagesLoadedMsg{
-					ChannelID: channelID,
+					ChannelID: chIDStr,
 					Messages:  msgItems,
 				}
 			},
-			Join: func(channelID, channelName string) tea.Msg {
+			Join: func(channelID ids.ChannelID, channelName string) tea.Msg {
+				chIDStr := string(channelID)
 				wctx := router.Active()
 				if wctx == nil {
 					return nil
 				}
 				ctx := context.Background()
-				if err := wctx.Client.JoinChannel(ctx, channelID); err != nil {
-					return ui.ChannelJoinFailedMsg{ID: channelID, Name: channelName, Err: err}
+				if err := wctx.Client.JoinChannel(ctx, chIDStr); err != nil {
+					return ui.ChannelJoinFailedMsg{ID: chIDStr, Name: channelName, Err: err}
 				}
-				return ui.ChannelJoinedMsg{ID: channelID, Name: channelName}
+				return ui.ChannelJoinedMsg{ID: chIDStr, Name: channelName}
 			},
 		}))
 

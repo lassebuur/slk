@@ -54,6 +54,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/gammons/slk/internal/debuglog"
+	"github.com/gammons/slk/internal/ids"
 	"github.com/gammons/slk/internal/ui/sidebar"
 )
 
@@ -199,7 +200,7 @@ func reduceChannelSelected(a *App, m ChannelSelectedMsg) tea.Cmd {
 	a.channelFinder.UpdateLastVisited(m.ID, now)
 	// Persist the visit (SQLite write + WorkspaceContext map update)
 	// asynchronously via main.go's recorder closure.
-	a.channels.RecordVisit(m.ID)
+	a.channels.RecordVisit(ids.ChannelID(m.ID))
 	if !m.FromHistory {
 		a.navHistory.Push(a.activeTeamID, m.ID)
 	}
@@ -231,14 +232,14 @@ func reduceChannelSelected(a *App, m ChannelSelectedMsg) tea.Cmd {
 	// test in app_test.go.
 	{
 		channels := a.channels
-		channelID := m.ID
+		channelID := ids.ChannelID(m.ID)
 		go channels.MembershipFetch(channelID)
 	}
 	a.statusbar.SetChannel(m.Name)
 	a.statusbar.SetChannelType(m.Type)
 
-	cached := a.channels.ReadCache(m.ID)
-	syncedAt := a.channels.SyncedAt(m.ID)
+	cached := a.channels.ReadCache(ids.ChannelID(m.ID))
+	syncedAt := a.channels.SyncedAt(ids.ChannelID(m.ID))
 	age := time.Duration(0)
 	if syncedAt > 0 {
 		age = time.Since(time.Unix(syncedAt, 0))
@@ -248,7 +249,7 @@ func reduceChannelSelected(a *App, m ChannelSelectedMsg) tea.Cmd {
 
 	fetchCmd := func() tea.Cmd {
 		channels := a.channels
-		chID, chName := m.ID, m.Name
+		chID, chName := ids.ChannelID(m.ID), m.Name
 		debuglog.Cache("ChannelSelectedMsg: channel=%s firing background network fetch", m.ID)
 		return func() tea.Msg { return channels.Fetch(chID, chName) }
 	}
@@ -267,8 +268,8 @@ func reduceChannelSelected(a *App, m ChannelSelectedMsg) tea.Cmd {
 			return nil
 		}
 		channels := a.channels
-		chID := m.ID
-		latestTS := cached[len(cached)-1].TS
+		chID := ids.ChannelID(m.ID)
+		latestTS := ids.MessageTS(cached[len(cached)-1].TS)
 		return func() tea.Msg { return channels.MarkRead(chID, latestTS) }
 
 	case len(cached) > 0:

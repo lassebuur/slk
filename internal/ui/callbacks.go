@@ -29,17 +29,17 @@ import (
 type SwitchWorkspaceFunc func(teamID string) tea.Msg
 
 // ChannelFetchFunc is called when the user selects a channel.
-type ChannelFetchFunc func(channelID, channelName string) tea.Msg
+type ChannelFetchFunc func(channelID ids.ChannelID, channelName string) tea.Msg
 
 // ChannelCacheReadFunc is called synchronously when the user selects a
 // channel; it returns cached messages from local storage. Returning a
 // non-empty slice causes the messagepane to render immediately without
 // the loading spinner. Returning nil falls through to the network
 // fetcher.
-type ChannelCacheReadFunc func(channelID string) []messages.MessageItem
+type ChannelCacheReadFunc func(channelID ids.ChannelID) []messages.MessageItem
 
 // OlderMessagesFetchFunc is called when the user scrolls to the top of a channel.
-type OlderMessagesFetchFunc func(channelID, oldestTS string) tea.Msg
+type OlderMessagesFetchFunc func(channelID ids.ChannelID, oldestTS ids.MessageTS) tea.Msg
 
 // MessageSendFunc is called when the user sends a message. Returns a tea.Msg with the result.
 type MessageSendFunc func(channelID ids.ChannelID, text string) tea.Msg
@@ -102,19 +102,19 @@ type TypingSendFunc func(channelID string)
 
 // JoinChannelFunc is called to join a public channel by ID. Returns a tea.Msg
 // describing the result (typically ChannelJoinedMsg or ChannelJoinFailedMsg).
-type JoinChannelFunc func(channelID, channelName string) tea.Msg
+type JoinChannelFunc func(channelID ids.ChannelID, channelName string) tea.Msg
 
 // ChannelVisitRecorder is invoked from case ChannelSelectedMsg to let
 // main.go persist the visit (SQLite write + in-memory map update on
 // the WorkspaceContext). Always called regardless of FromHistory.
-type ChannelVisitRecorder func(channelID string)
+type ChannelVisitRecorder func(channelID ids.ChannelID)
 
 // ChannelLookupFunc returns metadata for a channel that the App has
 // in its navigation history. Used by navigateBack / navigateForward
 // to skip stale entries (channels the user has left, archived, or
 // kicked from). Returns ok=false when the channel is no longer
 // available in the active workspace.
-type ChannelLookupFunc func(channelID string) (name, channelType string, ok bool)
+type ChannelLookupFunc func(channelID ids.ChannelID) (name, channelType string, ok bool)
 
 // clipboardReader abstracts clipboard.Read so tests can inject fake
 // clipboard contents. Production code uses the real clipboard.Read.
