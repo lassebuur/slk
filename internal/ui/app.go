@@ -407,6 +407,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		reduceSend,
 		reduceChannels,
 		reduceWorkspace,
+		reduceNewMessagePicker,
 		reduceIO,
 		reduceMouse,
 	); handled {
