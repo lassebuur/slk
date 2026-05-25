@@ -70,8 +70,9 @@ Add a "new message" picker that lets the user start a DM (1 user) or group DM / 
                     |
                     v
 +--------------------------------------+
-| ConversationOpenedMsg{ChannelID,     |
-|                       AlreadyOpen}   |
+| NewMessageOpenedMsg{ChannelID,       |
+|                     AlreadyOpen,     |
+|                     RequestID}       |
 +-------------------+------------------+
                     |
                     v
@@ -108,12 +109,12 @@ Add a "new message" picker that lets the user start a DM (1 user) or group DM / 
 
 6. **`internal/ui/msgs.go` (edit)**
    - `EnterNewMessageMsg struct{}` (dispatched by Ctrl+N).
-   - `ConversationOpenedMsg{ChannelID string; AlreadyOpen bool; RequestID uint64}` (returned by the service cmd).
-   - Errors reuse the existing error message type used by `SendMessage`.
+   - `NewMessageOpenedMsg{ChannelID string; AlreadyOpen bool; RequestID uint64}` (returned by the service cmd). Name avoids collision with the existing `ConversationOpenedMsg` (line 198) which is dispatched for WS `mpim_open` / `im_created` events.
+   - `NewMessageFailedMsg{RequestID uint64; Err error}` for the error path. A new type (not reuse) so the cancellation-by-RequestID logic doesn't have to dig into `SendMessage`-shaped errors.
 
-7. **Reducer (`reducer_new_message.go` or extend an existing reducer)**
-   - Handles `EnterNewMessageMsg`, `ConversationOpenedMsg`, error path, and the cancel/in-flight tracking.
-   - On `ConversationOpenedMsg` with a matching un-cancelled `RequestID`: insert minimal channel record into cache (ID, Type, Members), emit `ChannelSelectedMsg`, emit `EnterInsertModeMsg`, close modal.
+7. **Reducer (`reducer_new_message.go`)**
+   - Handles `EnterNewMessageMsg`, `NewMessageOpenedMsg`, `NewMessageFailedMsg`, and the cancel/in-flight tracking.
+   - On `NewMessageOpenedMsg` with a matching un-cancelled `RequestID`: insert minimal channel record into cache (ID, Type, Members), emit `ChannelSelectedMsg`, transition to `ModeInsert`, close modal.
 
 ## UI Layout
 
@@ -212,15 +213,15 @@ ModeNormal --(Ctrl+N)--> ModeNewMessage
 ModeNewMessage --(Esc / Ctrl+G)--> ModeNormal
 ModeNewMessage --(Enter w/ valid selection)--> ModeNewMessage[in-flight]
 ModeNewMessage[in-flight] --(Esc)--> ModeNormal (cancelled; late result dropped)
-ModeNewMessage[in-flight] --(ConversationOpenedMsg, not cancelled)--> ModeInsert (in opened channel)
-ModeNewMessage[in-flight] --(error)--> ModeNewMessage (modal stays open, error banner shown)
+ModeNewMessage[in-flight] --(NewMessageOpenedMsg, not cancelled)--> ModeInsert (in opened channel)
+ModeNewMessage[in-flight] --(NewMessageFailedMsg, not cancelled)--> ModeNewMessage (modal stays open, error banner shown)
 ```
 
 ### Cancellation
 
-Each submit gets a monotonic `RequestID uint64`. The reducer tracks the in-flight ID and a `cancelled bool`. On Esc during in-flight, modal closes and `cancelled=true`. When the service result arrives:
+Each submit gets a monotonic `RequestID uint64`. The reducer tracks the current in-flight ID (`a.newMessageInFlightID`) and a `cancelled bool` (`a.newMessageCancelled`). On Esc during in-flight, modal closes and `cancelled=true`. When the service result arrives:
 
-- If its `RequestID` matches AND not cancelled → proceed.
+- If its `RequestID` matches `a.newMessageInFlightID` AND not cancelled → proceed.
 - Otherwise → drop silently.
 
 This avoids the surprising "channel switches after the user backed out" behavior.
@@ -277,9 +278,9 @@ Add `openConversationContextFn` to `mockSlackAPI`:
 
 - `Ctrl+N` in `ModeNormal` enters `ModeNewMessage` and constructs picker.
 - Submit dispatches `ChannelService.OpenConversation` with correct user IDs.
-- `ConversationOpenedMsg` (not cancelled) → emits `ChannelSelectedMsg` + `EnterInsertModeMsg`; modal closes.
-- Esc during in-flight sets cancelled; late `ConversationOpenedMsg` is dropped (no mode change, no channel switch).
-- Error during in-flight keeps modal open with error banner; selections intact.
+- `NewMessageOpenedMsg` (not cancelled) → emits `ChannelSelectedMsg` and transitions to `ModeInsert`; modal closes.
+- Esc during in-flight sets cancelled; late `NewMessageOpenedMsg` is dropped (no mode change, no channel switch).
+- `NewMessageFailedMsg` during in-flight keeps modal open with error banner; selections intact.
 - Channel-not-in-cache path: minimal record inserted before `ChannelSelectedMsg`.
 
 ### Manual verification (not automated)
