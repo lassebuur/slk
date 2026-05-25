@@ -7,6 +7,9 @@ import (
 
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
+
+	"github.com/gammons/slk/internal/config"
+	"github.com/gammons/slk/internal/ui/styles"
 )
 
 // TestLabeledLinkShowsLabelAndOSC8 asserts that a Slack-style labeled link
@@ -616,5 +619,59 @@ func TestSubstituteBgSGR(t *testing.T) {
 					tc.in, tc.from, useTo, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestRepaintBgToSelectionTintWithANSITheme exercises the integration
+// of substituteBgSGR via RepaintBgToSelectionTint when the theme uses
+// an ANSI 16 background. We apply ansi-dark so styles.Background is
+// ansi.BasicColor(0) → BgANSI() == "\x1b[40m". The repaint must
+// substitute the bundled "40" param without corrupting either literal
+// content or 256-color sub-arguments.
+func TestRepaintBgToSelectionTintWithANSITheme(t *testing.T) {
+	// Apply ansi-dark; restore dark afterward.
+	styles.Apply("ansi-dark", config.Theme{})
+	t.Cleanup(func() { styles.Apply("dark", config.Theme{}) })
+
+	if BgANSI() != "\x1b[40m" {
+		t.Fatalf("precondition: expected BgANSI() == \"\\x1b[40m\", got %q", BgANSI())
+	}
+
+	// Build a synthetic rendered string mixing: plain text containing
+	// the digit "40", a bundled SGR with bg 40, and a 256-color FG that
+	// includes "40" as its index (must NOT be substituted).
+	in := "see line 40\x1b[1;31;40mbold red on black\x1b[m and \x1b[38;5;40mfg256\x1b[m"
+	out := RepaintBgToSelectionTint(in, true)
+
+	// "line 40" plain digits must survive.
+	if !strings.Contains(out, "see line 40") {
+		t.Errorf("plain digit run was corrupted: %q", out)
+	}
+	// The bundled bg "40" must be replaced.
+	if strings.Contains(out, "\x1b[1;31;40m") {
+		t.Errorf("expected bundled bg 40 to be substituted, got %q", out)
+	}
+	// The 256-color FG with index 40 must be intact.
+	if !strings.Contains(out, "\x1b[38;5;40m") {
+		t.Errorf("expected 256-color FG index 40 to remain intact, got %q", out)
+	}
+}
+
+// TestRepaintBgToSelectionTintBackwardCompat asserts no behavior change
+// for truecolor themes — substituting a long, unique RGB param.
+func TestRepaintBgToSelectionTintBackwardCompat(t *testing.T) {
+	styles.Apply("dark", config.Theme{})
+	bg := BgANSI()
+	// We don't know the exact params; just verify a string carrying
+	// that exact bg escape gets substituted and a string with no bg
+	// escape passes through unchanged.
+	withBg := "prefix" + bg + "tinted\x1b[m suffix"
+	got := RepaintBgToSelectionTint(withBg, true)
+	if got == withBg {
+		t.Errorf("expected substitution to occur for dark theme bg")
+	}
+	noBg := "no escape here"
+	if got := RepaintBgToSelectionTint(noBg, true); got != noBg {
+		t.Errorf("expected pass-through for string with no bg escape, got %q", got)
 	}
 }

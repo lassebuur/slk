@@ -330,7 +330,7 @@ func RepaintBgToSelectionTint(s string, focused bool) string {
 	if from == "" || from == to {
 		return s
 	}
-	return strings.ReplaceAll(s, from, to)
+	return substituteBgSGR(s, from, to)
 }
 
 // bgSGRParams strips the "\x1b[" prefix and "m" suffix from a bg ANSI
