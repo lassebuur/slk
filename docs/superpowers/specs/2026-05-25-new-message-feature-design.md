@@ -21,6 +21,7 @@ Add a "new message" picker that lets the user start a DM (1 user) or group DM / 
 - Renaming or converting an MPIM to a private channel. Out of scope.
 - User-list refresh while the modal is open. Snapshot at open time.
 - Golden-file rendering tests. The repo doesn't have that infra and we won't add it for this feature.
+- Recency-based ordering. Deferred to a follow-up plan — sourcing the data cleanly requires plumbing `WorkspaceContext.LastVisitedByChannel` from `main.go` through to the App, and that touches several files that can change independently of this feature. v1 sorts purely alphabetically; users still find people via fuzzy filter.
 
 ## User Flow
 
@@ -214,7 +215,7 @@ ModeNewMessage --(Esc / Ctrl+G)--> ModeNormal
 ModeNewMessage --(Enter w/ valid selection)--> ModeNewMessage[in-flight]
 ModeNewMessage[in-flight] --(Esc)--> ModeNormal (cancelled; late result dropped)
 ModeNewMessage[in-flight] --(NewMessageOpenedMsg, not cancelled)--> ModeInsert (in opened channel)
-ModeNewMessage[in-flight] --(NewMessageFailedMsg, not cancelled)--> ModeNewMessage (modal stays open, error banner shown)
+ModeNewMessage[in-flight] --(NewMessageFailedMsg, not cancelled)--> ModeNewMessage (modal stays open, toast surfaces the error)
 ```
 
 ### Cancellation
@@ -230,7 +231,7 @@ This avoids the surprising "channel switches after the user backed out" behavior
 
 | Failure | Surface | Recovery |
 |---|---|---|
-| Slack API error (network, auth, rate-limit) | Error banner in modal footer; modal stays open; selections preserved | User retries via Enter or Esc to cancel |
+| Slack API error (network, auth, rate-limit) | Toast via existing `ToastMsg` channel ("Open DM failed: <reason>"); modal stays open; selections preserved | User retries via Enter or Esc to cancel |
 | User picks 8 then tries to add a 9th | Space is no-op; footer dims `8 / 8` and shows `MPIM limit reached` | Remove a pill (backspace) first |
 | User cache empty at modal open | `Loading users...` placeholder; refreshes when cache populates | Type to filter once loaded |
 | Query has no matches | List shows `No users match "<query>"`; Enter is no-op | Refine query |
@@ -280,7 +281,7 @@ Add `openConversationContextFn` to `mockSlackAPI`:
 - Submit dispatches `ChannelService.OpenConversation` with correct user IDs.
 - `NewMessageOpenedMsg` (not cancelled) → emits `ChannelSelectedMsg` and transitions to `ModeInsert`; modal closes.
 - Esc during in-flight sets cancelled; late `NewMessageOpenedMsg` is dropped (no mode change, no channel switch).
-- `NewMessageFailedMsg` during in-flight keeps modal open with error banner; selections intact.
+- `NewMessageFailedMsg` during in-flight keeps modal open and emits a `ToastMsg`; selections intact.
 - Channel-not-in-cache path: minimal record inserted before `ChannelSelectedMsg`.
 
 ### Manual verification (not automated)
