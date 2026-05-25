@@ -218,3 +218,65 @@ func TestReducer_NewMessageFailedMsg_KeepsModalOpenAndEmitsToast(t *testing.T) {
 		t.Error("expected non-empty toast text")
 	}
 }
+
+func TestEndToEnd_CtrlN_SelectUser_Enter_OpensDM(t *testing.T) {
+	app, cap := newApp_WithOpenConvCapture(t)
+
+	// 1. User presses Ctrl+N.
+	_, _ = app.Update(EnterNewMessageMsg{})
+
+	if app.mode != ModeNewMessage {
+		t.Fatalf("step 1: expected ModeNewMessage, got %v", app.mode)
+	}
+
+	// 2. User types "ali" to filter down to Alice.
+	app.newMessagePicker.HandleKey("a")
+	app.newMessagePicker.HandleKey("l")
+	app.newMessagePicker.HandleKey("i")
+
+	// 3. User presses Enter on the highlighted (Alice) row.
+	result := app.newMessagePicker.HandleKey("enter")
+	if result == nil {
+		t.Fatal("step 3: expected non-nil Result from Enter")
+	}
+	if len(result.UserIDs) != 1 || result.UserIDs[0] != "U1" {
+		t.Errorf("step 3: expected [U1], got %v", result.UserIDs)
+	}
+
+	// 4. The mode handler would call OpenConversation here. Simulate.
+	app.newMessageInFlightID++
+	reqID := app.newMessageInFlightID
+	_ = app.channels.OpenConversation(result.UserIDs, reqID)
+
+	if len(cap.calls) != 1 {
+		t.Fatalf("step 4: expected exactly 1 OpenConversation call, got %d", len(cap.calls))
+	}
+	if cap.calls[0].UserIDs[0] != "U1" {
+		t.Errorf("step 4: expected userID U1, got %s", cap.calls[0].UserIDs[0])
+	}
+
+	// 5. Slack returns success; reducer transitions to ModeInsert.
+	_, cmd := app.Update(NewMessageOpenedMsg{
+		ChannelID:   "D123",
+		AlreadyOpen: true,
+		UserIDs:     []string{"U1"},
+		RequestID:   reqID,
+	})
+
+	if app.mode != ModeInsert {
+		t.Errorf("step 5: expected ModeInsert, got %v", app.mode)
+	}
+	if app.newMessagePicker.IsVisible() {
+		t.Error("step 5: expected picker hidden")
+	}
+
+	// 6. The cmd should emit ChannelSelectedMsg{ID: D123, Type: dm}.
+	msg := cmd()
+	sel, ok := msg.(ChannelSelectedMsg)
+	if !ok {
+		t.Fatalf("step 6: expected ChannelSelectedMsg, got %T", msg)
+	}
+	if sel.ID != "D123" || sel.Type != "dm" {
+		t.Errorf("step 6: want {D123, dm}, got {%s, %s}", sel.ID, sel.Type)
+	}
+}
