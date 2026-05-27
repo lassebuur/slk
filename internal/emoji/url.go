@@ -64,3 +64,54 @@ func CodepointsForShortcode(name string) ([]rune, bool) {
 	}
 	return []rune(u), true
 }
+
+// customEmojiAliasPrefix marks a Slack custom-emoji alias entry
+// (e.g., "alias:thumbsup"). Mirrors aliasPrefix in entries.go; kept
+// separate so the URL-building code is self-contained at a glance.
+//
+// (Note: maxAliasHops is already declared in entries.go with the
+// same value/semantic and is reused here rather than re-declared.)
+const customEmojiAliasPrefix = "alias:"
+
+// BuildCustomEmojiURL resolves a shortcode name to a URL using the
+// workspace's customs map first, then (if the customs map has an
+// "alias:<target>" entry) the kyokomi codemap for the target.
+//
+// Returns (url, true) on hit. Returns ("", false) when:
+//   - name is not in customs and is not a kyokomi builtin reachable
+//     through an alias entry
+//   - the alias chain cycles or exceeds maxAliasHops
+//
+// Direct kyokomi-known names (no customs entry) are intentionally
+// NOT resolved here — call CodepointsForShortcode +
+// BuildStandardEmojiURL for those. This separation keeps each
+// function single-purpose and lets callers fall back to glyph
+// rendering at the right granularity when one path fails.
+func BuildCustomEmojiURL(name string, customs map[string]string) (string, bool) {
+	visited := make(map[string]struct{}, maxAliasHops)
+	current := name
+	for hop := 0; hop < maxAliasHops; hop++ {
+		if _, seen := visited[current]; seen {
+			return "", false // cycle
+		}
+		visited[current] = struct{}{}
+
+		entry, ok := customs[current]
+		if !ok {
+			return "", false
+		}
+		if !strings.HasPrefix(entry, customEmojiAliasPrefix) {
+			// Direct custom URL.
+			return entry, true
+		}
+		target := strings.TrimPrefix(entry, customEmojiAliasPrefix)
+
+		// If the alias target is a kyokomi builtin, resolve it now.
+		// If it's another custom name, loop and follow.
+		if cps, ok := CodepointsForShortcode(target); ok {
+			return BuildStandardEmojiURL(cps), true
+		}
+		current = target
+	}
+	return "", false // exceeded max hops
+}

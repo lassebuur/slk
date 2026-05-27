@@ -86,3 +86,50 @@ func runesEqual(a, b []rune) bool {
 	}
 	return true
 }
+
+func TestBuildCustomEmojiURL(t *testing.T) {
+	customs := map[string]string{
+		"party_parrot": "https://emoji.slack-edge.com/T01/party_parrot/abc.gif",
+		"company_logo": "https://emoji.slack-edge.com/T01/company_logo/def.png",
+		"shipit":       "alias:rocket",       // alias to a built-in
+		"yay":          "alias:party_parrot", // alias to a custom
+		"chain_a":      "alias:chain_b",
+		"chain_b":      "alias:chain_c",
+		"chain_c":      "https://emoji.slack-edge.com/T01/chain_c/xyz.png",
+		"loop_a":       "alias:loop_b",
+		"loop_b":       "alias:loop_a",
+	}
+
+	cases := []struct {
+		name    string
+		wantURL string
+		wantOK  bool
+	}{
+		// Direct custom: URL returned verbatim.
+		{"party_parrot", "https://emoji.slack-edge.com/T01/party_parrot/abc.gif", true},
+		{"company_logo", "https://emoji.slack-edge.com/T01/company_logo/def.png", true},
+
+		// alias:<builtin>: resolves to the standard emoji URL.
+		// rocket = U+1F680 = 1f680.png
+		{"shipit", CDNBaseURL + "1f680.png", true},
+
+		// alias:<custom>: resolves through to the custom's URL.
+		{"yay", "https://emoji.slack-edge.com/T01/party_parrot/abc.gif", true},
+
+		// Multi-hop alias chain.
+		{"chain_a", "https://emoji.slack-edge.com/T01/chain_c/xyz.png", true},
+
+		// Alias cycle: detected, returns ok=false.
+		{"loop_a", "", false},
+
+		// Unknown name: ok=false.
+		{"never_defined", "", false},
+	}
+	for _, c := range cases {
+		got, ok := BuildCustomEmojiURL(c.name, customs)
+		if ok != c.wantOK || got != c.wantURL {
+			t.Errorf("BuildCustomEmojiURL(%q) = (%q, %v), want (%q, %v)",
+				c.name, got, ok, c.wantURL, c.wantOK)
+		}
+	}
+}
