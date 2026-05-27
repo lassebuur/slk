@@ -391,6 +391,42 @@ func main() {
 		}
 	}
 
+	// Load config early (best-effort) so we can pre-detect the image
+	// rendering protocol and decide whether to skip the emoji width
+	// probe. run() loads config independently as the source of truth;
+	// this duplicate load mirrors the best-effort pattern used at the
+	// bottom of this file (search for "best-effort" near config.Load).
+	// Plan-deviation note: the original plan assumed cfg was available
+	// pre-probe, but config.Load actually lives in run() (line 467).
+	// Loading here adds ~1ms and lets the probe-skip decision happen
+	// before the ~30s probe runs.
+	preCfgPath := filepath.Join(xdgConfig(), "config.toml")
+	preCfg, preCfgErr := config.Load(preCfgPath)
+	if preCfgErr != nil {
+		debuglog.ImgRender("pre-probe config load failed: %v (continuing without image-mode pre-detect)", preCfgErr)
+	}
+
+	// Pre-detect the image rendering protocol (env-based; non-interactive)
+	// so we can decide whether to skip the emoji width probe entirely.
+	// Image mode is active when the user has requested it AND we have
+	// reasonable confidence kitty will be the final protocol. The
+	// interactive kitty version probe in run() may still downgrade
+	// kitty→halfblock; in that rare case the user has already paid the
+	// probe-skip and will see lipgloss-fallback widths for non-trivial
+	// clusters. Acceptable tradeoff for the common-case startup win.
+	if preCfgErr == nil {
+		preDetectedProto := imgpkg.Detect(imgpkg.CaptureEnv(), preCfg.Appearance.ImageProtocol)
+		imageMode := preCfg.Appearance.EmojiImages == "on" && preDetectedProto == imgpkg.ProtoKitty
+		emojiwidth.SetImageMode(imageMode, preCfg.Appearance.EmojiCells)
+		if imageMode {
+			debuglog.ImgRender("emoji image mode: ON (pre-detected proto=%s, emoji_images=%q)",
+				preDetectedProto, preCfg.Appearance.EmojiImages)
+		} else {
+			debuglog.ImgRender("emoji image mode: OFF (pre-detected proto=%s, emoji_images=%q)",
+				preDetectedProto, preCfg.Appearance.EmojiImages)
+		}
+	}
+
 	// Emoji width probing: parse flags and call Init before bubbletea starts.
 	skipProbe := false
 	forceProbe := false
