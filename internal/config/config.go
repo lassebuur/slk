@@ -197,6 +197,18 @@ func Load(path string) (Config, error) {
 		cfg.Appearance.MouseWheelLines = 3
 	}
 
+	// Clamp EmojiCells to the documented set {1, 2}. 0 (unset after a
+	// partial [appearance] block) and any other value fall back to 2.
+	if cfg.Appearance.EmojiCells != 1 && cfg.Appearance.EmojiCells != 2 {
+		cfg.Appearance.EmojiCells = 2
+	}
+
+	// Clamp EmojiImages to the documented set {"on", "off"}. Empty
+	// (unset) and any unrecognized value fall back to "on".
+	if cfg.Appearance.EmojiImages != "on" && cfg.Appearance.EmojiImages != "off" {
+		cfg.Appearance.EmojiImages = "on"
+	}
+
 	return cfg, nil
 }
 

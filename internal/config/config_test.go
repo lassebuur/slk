@@ -266,6 +266,64 @@ emoji_cells = 1
 	}
 }
 
+func TestConfig_EmojiClamp(t *testing.T) {
+	// emoji_cells outside {1, 2} clamps to 2.
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(path, []byte("[appearance]\nemoji_cells = 5\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Appearance.EmojiCells != 2 {
+		t.Errorf("emoji_cells=5 should clamp to 2, got %d", cfg.Appearance.EmojiCells)
+	}
+
+	// emoji_cells = 0 (unset after partial [appearance]) clamps to 2.
+	path2 := filepath.Join(dir, "config2.toml")
+	if err := os.WriteFile(path2, []byte("[appearance]\ntheme = \"nord\"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg2, err := Load(path2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg2.Appearance.EmojiCells != 2 {
+		t.Errorf("unset emoji_cells should default to 2, got %d", cfg2.Appearance.EmojiCells)
+	}
+	if cfg2.Appearance.EmojiImages != "on" {
+		t.Errorf("unset emoji_images should default to 'on', got %q", cfg2.Appearance.EmojiImages)
+	}
+
+	// emoji_images with an unrecognized value clamps to "on".
+	path3 := filepath.Join(dir, "config3.toml")
+	if err := os.WriteFile(path3, []byte("[appearance]\nemoji_images = \"weird\"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg3, err := Load(path3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg3.Appearance.EmojiImages != "on" {
+		t.Errorf("unrecognized emoji_images should clamp to 'on', got %q", cfg3.Appearance.EmojiImages)
+	}
+
+	// emoji_cells = 1 explicit value passes through (valid).
+	path4 := filepath.Join(dir, "config4.toml")
+	if err := os.WriteFile(path4, []byte("[appearance]\nemoji_cells = 1\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg4, err := Load(path4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg4.Appearance.EmojiCells != 1 {
+		t.Errorf("emoji_cells=1 should pass through, got %d", cfg4.Appearance.EmojiCells)
+	}
+}
+
 func TestResolveThemeWorkspaceWins(t *testing.T) {
 	c := Config{
 		Appearance: Appearance{Theme: "dark"},
