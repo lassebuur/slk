@@ -38,6 +38,43 @@ type Model struct {
 	messageTS         string
 	channelID         string
 	existingReactions []string
+	emojiCtx          EmojiContext
+}
+
+// EmojiContext bundles the emoji-image rendering dependencies for the
+// reaction picker. Set once at startup; updated again when the
+// CustomEmojisLoadedMsg arrives via SetEmojiCustoms. Mirrors
+// messages.EmojiContext / thread.EmojiContext.
+type EmojiContext struct {
+	PlaceCtx slkemoji.PlaceContext
+	Cells    int               // 1 or 2; 0 falls back to 2
+	Customs  map[string]string // workspace custom emoji map; nil = empty
+}
+
+// SetEmojiContext configures emoji-image rendering for the picker.
+// Mirrors messages.Model.SetEmojiContext.
+func (m *Model) SetEmojiContext(ctx EmojiContext) {
+	if ctx.Cells != 1 && ctx.Cells != 2 {
+		ctx.Cells = 2
+	}
+	m.emojiCtx = ctx
+}
+
+// SetEmojiCustoms updates the customs map without changing PlaceCtx
+// or Cells. Called from App.SetCustomEmoji when the workspace's
+// custom emoji list arrives. Mirrors messages.Model.SetEmojiCustoms.
+func (m *Model) SetEmojiCustoms(customs map[string]string) {
+	m.emojiCtx.Customs = customs
+}
+
+// HandleEmojiImageReady forces the next View() to re-render so any
+// emoji whose cold-cache fetch just completed picks up the warm
+// placement. Picker has no render cache; this is currently a no-op
+// hook for shape parity with messages/thread/autocomplete. Documented
+// so future caching can drop in without changing the reducer arm.
+func (m *Model) HandleEmojiImageReady(url string) {
+	// no-op; picker re-evaluates Place on every View().
+	_ = url
 }
 
 // New creates a new reaction picker with the full emoji list.
