@@ -1,11 +1,15 @@
 package messages
 
 import (
+	"image/color"
 	"strings"
 	"testing"
 
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
+
+	"github.com/gammons/slk/internal/config"
+	"github.com/gammons/slk/internal/ui/styles"
 )
 
 // TestLabeledLinkShowsLabelAndOSC8 asserts that a Slack-style labeled link
@@ -439,5 +443,247 @@ func TestEscapedAngleBracketsNotMistakenForMention(t *testing.T) {
 	}
 	if !strings.Contains(plain, "<@U123>") {
 		t.Errorf("expected literal %q, got %q", "<@U123>", plain)
+	}
+}
+
+// TestBgANSIForBasicColor asserts that bgANSIFor emits native ANSI 16
+// background escapes (e.g. "\x1b[41m") for ansi.BasicColor instead of
+// degrading to truecolor. Native ANSI 16 escapes are required for the
+// terminal palette to be honored — truecolor escapes always bypass it.
+func TestBgANSIForBasicColor(t *testing.T) {
+	cases := []struct {
+		name string
+		c    ansi.BasicColor
+		want string
+	}{
+		{"black", 0, "\x1b[40m"},
+		{"red", 1, "\x1b[41m"},
+		{"white", 7, "\x1b[47m"},
+		{"bright black", 8, "\x1b[100m"},
+		{"bright red", 9, "\x1b[101m"},
+		{"bright white", 15, "\x1b[107m"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := bgANSIFor(tc.c)
+			if got != tc.want {
+				t.Errorf("bgANSIFor(%d) = %q, want %q", tc.c, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestFgANSIForBasicColor: symmetric for foreground.
+func TestFgANSIForBasicColor(t *testing.T) {
+	cases := []struct {
+		name string
+		c    ansi.BasicColor
+		want string
+	}{
+		{"black", 0, "\x1b[30m"},
+		{"red", 1, "\x1b[31m"},
+		{"white", 7, "\x1b[37m"},
+		{"bright black", 8, "\x1b[90m"},
+		{"bright red", 9, "\x1b[91m"},
+		{"bright white", 15, "\x1b[97m"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := fgANSIFor(tc.c)
+			if got != tc.want {
+				t.Errorf("fgANSIFor(%d) = %q, want %q", tc.c, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestBgFgANSIForIndexedColor asserts ANSI 256 emission for ansi.IndexedColor.
+func TestBgFgANSIForIndexedColor(t *testing.T) {
+	if got := bgANSIFor(ansi.IndexedColor(42)); got != "\x1b[48;5;42m" {
+		t.Errorf("bgANSIFor(IndexedColor(42)) = %q, want %q", got, "\x1b[48;5;42m")
+	}
+	if got := fgANSIFor(ansi.IndexedColor(200)); got != "\x1b[38;5;200m" {
+		t.Errorf("fgANSIFor(IndexedColor(200)) = %q, want %q", got, "\x1b[38;5;200m")
+	}
+}
+
+// TestBgFgANSIForRGBA is a regression guard: truecolor emission is unchanged
+// for existing hex-based themes.
+func TestBgFgANSIForRGBA(t *testing.T) {
+	c := color.RGBA{R: 26, G: 26, B: 46, A: 0xff}
+	if got := bgANSIFor(c); got != "\x1b[48;2;26;26;46m" {
+		t.Errorf("bgANSIFor(RGBA) = %q, want %q", got, "\x1b[48;2;26;26;46m")
+	}
+	if got := fgANSIFor(c); got != "\x1b[38;2;26;26;46m" {
+		t.Errorf("fgANSIFor(RGBA) = %q, want %q", got, "\x1b[38;2;26;26;46m")
+	}
+}
+
+// TestBgFgANSIForBasicColorOutOfRange pins the documented fall-through:
+// BasicColor values ≥16 (constructible since BasicColor is uint8) are
+// out of the valid 0-15 range and must fall through to truecolor rather
+// than producing malformed escapes like "\x1b[116m".
+func TestBgFgANSIForBasicColorOutOfRange(t *testing.T) {
+	bg := bgANSIFor(ansi.BasicColor(16))
+	if !strings.HasPrefix(bg, "\x1b[48;2;") {
+		t.Errorf("out-of-range BasicColor bg should fall through to truecolor, got %q", bg)
+	}
+	fg := fgANSIFor(ansi.BasicColor(16))
+	if !strings.HasPrefix(fg, "\x1b[38;2;") {
+		t.Errorf("out-of-range BasicColor fg should fall through to truecolor, got %q", fg)
+	}
+}
+
+// TestSubstituteBgSGR exercises the grammar-aware bg-parameter
+// substitution. The helper must:
+//   (1) substitute the param when it stands alone (\x1b[40m)
+//   (2) substitute the param within a bundled SGR (\x1b[1;31;40m)
+//   (3) NOT corrupt literal digits in non-SGR content
+//   (4) NOT match the param value inside a 256-color sub-argument
+//       (\x1b[38;5;40m is an FG index 40, not a bg basic 40)
+//   (5) leave the string unchanged when from == to
+func TestSubstituteBgSGR(t *testing.T) {
+	const to = "48;2;100;100;200"
+
+	cases := []struct {
+		name string
+		in   string
+		from string
+		want string
+	}{
+		{
+			name: "standalone ANSI bg",
+			in:   "\x1b[40mhello\x1b[m",
+			from: "40",
+			want: "\x1b[" + to + "mhello\x1b[m",
+		},
+		{
+			name: "bundled SGR with ANSI bg",
+			in:   "\x1b[1;31;40mbold red on black\x1b[m",
+			from: "40",
+			want: "\x1b[1;31;" + to + "mbold red on black\x1b[m",
+		},
+		{
+			name: "literal 40 in content is not touched",
+			in:   "page 40 of 100\x1b[40mtinted\x1b[m",
+			from: "40",
+			want: "page 40 of 100\x1b[" + to + "mtinted\x1b[m",
+		},
+		{
+			name: "256-color FG index 40 is not touched",
+			in:   "\x1b[38;5;40mfg only\x1b[m",
+			from: "40",
+			want: "\x1b[38;5;40mfg only\x1b[m",
+		},
+		{
+			name: "256-color FG index 40 alongside bg 40 — only bg substituted",
+			in:   "\x1b[38;5;40;40mfg256 bg basic\x1b[m",
+			from: "40",
+			want: "\x1b[38;5;40;" + to + "mfg256 bg basic\x1b[m",
+		},
+		{
+			name: "truecolor bg substring substitution",
+			in:   "\x1b[48;2;26;26;46mhello\x1b[m",
+			from: "48;2;26;26;46",
+			want: "\x1b[" + to + "mhello\x1b[m",
+		},
+		{
+			name: "truecolor bg within bundled SGR",
+			in:   "\x1b[1;38;2;255;255;255;48;2;26;26;46mtext\x1b[m",
+			from: "48;2;26;26;46",
+			want: "\x1b[1;38;2;255;255;255;" + to + "mtext\x1b[m",
+		},
+		{
+			name: "no match leaves string unchanged",
+			in:   "\x1b[31mred fg only\x1b[m",
+			from: "40",
+			want: "\x1b[31mred fg only\x1b[m",
+		},
+		{
+			name: "from == to is a no-op",
+			in:   "\x1b[40mhello\x1b[m",
+			from: "40",
+			// to passed = "40" same as from
+			want: "\x1b[40mhello\x1b[m",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			useTo := to
+			if tc.name == "from == to is a no-op" {
+				useTo = "40"
+			}
+			got := substituteBgSGR(tc.in, tc.from, useTo)
+			if got != tc.want {
+				t.Errorf("substituteBgSGR(%q, %q, %q) = %q, want %q",
+					tc.in, tc.from, useTo, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestRepaintBgToSelectionTintWithANSITheme exercises the integration
+// of substituteBgSGR via RepaintBgToSelectionTint when the theme uses
+// an ANSI 16 background. We apply ansi dark so BgANSI() returns the
+// basic 16-color form "\x1b[40m" — independent of how the theme stores
+// the value internally. The repaint must substitute the bundled "40"
+// param without corrupting either literal content or 256-color
+// sub-arguments.
+func TestRepaintBgToSelectionTintWithANSITheme(t *testing.T) {
+	// Apply ansi dark via the display-name form to exercise the same
+	// case-insensitive lookup path that the theme picker uses when it
+	// saves "ANSI Dark" to config.toml. Restore dark afterward.
+	styles.Apply("ANSI Dark", config.Theme{})
+	t.Cleanup(func() { styles.Apply("dark", config.Theme{}) })
+
+	if BgANSI() != "\x1b[40m" {
+		t.Skipf("ansi dark theme not yet registered (Task 4 dependency); BgANSI()=%q", BgANSI())
+	}
+
+	// Build a synthetic rendered string mixing: plain text containing
+	// the digit "40", a bundled SGR with bg 40, and a 256-color FG that
+	// includes "40" as its index (must NOT be substituted).
+	in := "see line 40\x1b[1;31;40mbold red on black\x1b[m and \x1b[38;5;40mfg256\x1b[m"
+	out := RepaintBgToSelectionTint(in, true)
+
+	// "line 40" plain digits must survive.
+	if !strings.Contains(out, "see line 40") {
+		t.Errorf("plain digit run was corrupted: %q", out)
+	}
+	// The bundled bg "40" must be replaced.
+	if strings.Contains(out, "\x1b[1;31;40m") {
+		t.Errorf("expected bundled bg 40 to be substituted, got %q", out)
+	}
+	// The 256-color FG with index 40 must be intact.
+	if !strings.Contains(out, "\x1b[38;5;40m") {
+		t.Errorf("expected 256-color FG index 40 to remain intact, got %q", out)
+	}
+}
+
+// TestRepaintBgToSelectionTintBackwardCompat asserts no behavior change
+// for truecolor themes — substituting a long, unique RGB param.
+func TestRepaintBgToSelectionTintBackwardCompat(t *testing.T) {
+	styles.Apply("dark", config.Theme{})
+	t.Cleanup(func() { styles.Apply("dark", config.Theme{}) })
+
+	bg := BgANSI()
+	tint := SelectionTintBgANSI(true)
+	from := bgSGRParams(bg)
+	to := bgSGRParams(tint)
+	if from == "" || from == to {
+		t.Fatalf("test setup invalid: from=%q to=%q (both must be non-empty and differ)", from, to)
+	}
+
+	// Standalone bg escape: substituted to tint.
+	in := "prefix" + bg + "tinted\x1b[m suffix"
+	want := "prefix\x1b[" + to + "mtinted\x1b[m suffix"
+	if got := RepaintBgToSelectionTint(in, true); got != want {
+		t.Errorf("standalone bg substitution: got %q, want %q", got, want)
+	}
+
+	// Pass-through: strings with no bg escape are unchanged.
+	noBg := "no escape here"
+	if got := RepaintBgToSelectionTint(noBg, true); got != noBg {
+		t.Errorf("pass-through: got %q, want %q", got, noBg)
 	}
 }

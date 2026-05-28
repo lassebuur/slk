@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/gammons/slk/internal/config"
 )
 
@@ -141,5 +142,146 @@ func TestLightThemesHaveDarkSidebars(t *testing.T) {
 		if c.RailBackground == "" {
 			t.Errorf("light theme %q must set RailBackground", key)
 		}
+	}
+}
+
+// TestANSIDarkThemeRegistered asserts the ansi-dark theme is present
+// in the theme switcher and that every color field is populated with
+// a value that resolves to ansi.BasicColor — confirming the theme
+// will inherit the user's terminal palette rather than emit truecolor.
+func TestANSIDarkThemeRegistered(t *testing.T) {
+	names := ThemeNames()
+	found := false
+	for _, n := range names {
+		if n == "ANSI Dark" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected \"ANSI Dark\" in ThemeNames, got %v", names)
+	}
+
+	c := lookupTheme("ANSI Dark")
+	required := map[string]string{
+		"Primary":     c.Primary,
+		"Accent":      c.Accent,
+		"Warning":     c.Warning,
+		"Error":       c.Error,
+		"Background":  c.Background,
+		"Surface":     c.Surface,
+		"SurfaceDark": c.SurfaceDark,
+		"Text":        c.Text,
+		"TextMuted":   c.TextMuted,
+		"Border":      c.Border,
+	}
+	for name, val := range required {
+		if val == "" {
+			t.Errorf("ansi dark.%s is empty", name)
+			continue
+		}
+		col := lipgloss.Color(val)
+		if _, ok := col.(ansi.BasicColor); !ok {
+			t.Errorf("ansi dark.%s = %q resolves to %T, want ansi.BasicColor",
+				name, val, col)
+		}
+	}
+}
+
+// TestANSILightThemeRegistered: mirror of TestANSIDarkThemeRegistered
+// for the light variant.
+func TestANSILightThemeRegistered(t *testing.T) {
+	names := ThemeNames()
+	found := false
+	for _, n := range names {
+		if n == "ANSI Light" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected \"ANSI Light\" in ThemeNames, got %v", names)
+	}
+
+	c := lookupTheme("ANSI Light")
+	required := map[string]string{
+		"Primary":     c.Primary,
+		"Accent":      c.Accent,
+		"Warning":     c.Warning,
+		"Error":       c.Error,
+		"Background":  c.Background,
+		"Surface":     c.Surface,
+		"SurfaceDark": c.SurfaceDark,
+		"Text":        c.Text,
+		"TextMuted":   c.TextMuted,
+		"Border":      c.Border,
+	}
+	for name, val := range required {
+		if val == "" {
+			t.Errorf("ansi light.%s is empty", name)
+			continue
+		}
+		col := lipgloss.Color(val)
+		if _, ok := col.(ansi.BasicColor); !ok {
+			t.Errorf("ansi light.%s = %q resolves to %T, want ansi.BasicColor",
+				name, val, col)
+		}
+	}
+}
+
+// TestANSIThemeLookupViaDisplayName regression-pins the realistic
+// theme-switcher path: when the user picks "ANSI Dark" via Ctrl+y,
+// the display name is saved verbatim to config.toml. On the next
+// render, lookupTheme must resolve "ANSI Dark" to the ansi-dark
+// theme — not fall through to the default "dark" theme.
+//
+// The key in builtinThemes must therefore lowercase-match "ANSI Dark"
+// after strings.ToLower, i.e. it must use a space separator like every
+// other multi-word built-in theme ("tokyo night", "gruvbox dark", etc).
+func TestANSIThemeLookupViaDisplayName(t *testing.T) {
+	dark := lookupTheme("ANSI Dark")
+	if dark.Background != "0" {
+		t.Errorf("lookupTheme(\"ANSI Dark\").Background = %q, want \"0\" — likely fell through to default \"dark\" theme", dark.Background)
+	}
+
+	light := lookupTheme("ANSI Light")
+	if light.Background != "15" {
+		t.Errorf("lookupTheme(\"ANSI Light\").Background = %q, want \"15\" — likely fell through to default \"dark\" theme", light.Background)
+	}
+}
+
+// TestANSIThemesSelectionTintPaletteInherited regression-pins that
+// SelectionTintColor for the ANSI themes returns a palette-inherited
+// ansi.BasicColor — not a near-black RGB mix from the default
+// mixColors(Accent, Background=ANSI 0, 0.15) path.
+//
+// Without explicit SelectionBgFocused/SelectionBgUnfocused on the
+// theme, ansi-dark's selection tint computes to roughly RGB(0,25,25)
+// which renders as effectively black against any dark terminal bg.
+// The fix sets the optional theme fields to a palette ANSI color
+// ("8" = bright black / gray) so the tint is visible and tracks
+// the user's terminal palette.
+func TestANSIThemesSelectionTintPaletteInherited(t *testing.T) {
+	cases := []struct {
+		theme string
+	}{
+		{"ansi dark"},
+		{"ansi light"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.theme, func(t *testing.T) {
+			Apply(tc.theme, config.Theme{})
+			t.Cleanup(func() { Apply("dark", config.Theme{}) })
+
+			focused := SelectionTintColor(true)
+			if _, ok := focused.(ansi.BasicColor); !ok {
+				t.Errorf("%s focused selection tint = %T, want ansi.BasicColor (palette-inherited)", tc.theme, focused)
+			}
+
+			unfocused := SelectionTintColor(false)
+			if _, ok := unfocused.(ansi.BasicColor); !ok {
+				t.Errorf("%s unfocused selection tint = %T, want ansi.BasicColor (palette-inherited)", tc.theme, unfocused)
+			}
+		})
 	}
 }
