@@ -180,7 +180,9 @@ var reduceIO reducerFunc = func(a *App, msg tea.Msg) (tea.Cmd, bool) {
 		a.messagepane.HandleEmojiImageReady(m.URL)
 		a.threadPanel.HandleEmojiImageReady(m.URL)
 		a.reactionPicker.HandleEmojiImageReady(m.URL) // no-op in v1; future caching may use it
-		// Phase 9 adds autocomplete.
+		// Autocomplete dropdowns have no cache; the no-op hooks on
+		// a.compose.emojiPicker / a.threadCompose.emojiPicker keep
+		// the surface symmetric. Listed here for the audit trail.
 		return nil, true
 
 	case messages.AvatarReadyMsg:

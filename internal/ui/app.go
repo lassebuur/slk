@@ -27,6 +27,7 @@ import (
 	"github.com/gammons/slk/internal/ui/channelpicker"
 	"github.com/gammons/slk/internal/ui/compose"
 	"github.com/gammons/slk/internal/ui/confirmprompt"
+	"github.com/gammons/slk/internal/ui/emojipicker"
 	"github.com/gammons/slk/internal/ui/help"
 	"github.com/gammons/slk/internal/ui/imgrender"
 	"github.com/gammons/slk/internal/ui/mentionpicker"
@@ -1420,6 +1421,16 @@ func (a *App) SetEmojiContext(ctx messages.EmojiContext) {
 		Customs:  ctx.Customs,
 	})
 	a.reactionPicker.SetEmojiContext(reactionpicker.EmojiContext{
+		PlaceCtx: ctx.PlaceCtx,
+		Cells:    ctx.Cells,
+		Customs:  ctx.Customs,
+	})
+	a.compose.SetEmojiContext(emojipicker.EmojiContext{
+		PlaceCtx: ctx.PlaceCtx,
+		Cells:    ctx.Cells,
+		Customs:  ctx.Customs,
+	})
+	a.threadCompose.SetEmojiContext(emojipicker.EmojiContext{
 		PlaceCtx: ctx.PlaceCtx,
 		Cells:    ctx.Cells,
 		Customs:  ctx.Customs,
