@@ -243,3 +243,55 @@ func TestPlace_ColdPath_DedupsConcurrentCalls(t *testing.T) {
 		t.Errorf("concurrent Place calls produced %d Fetch invocations, want 1 (dedup failed)", len(ff.fetchCalls))
 	}
 }
+
+func TestPlace_ColdPath_FetchError_LeavesNoInflight(t *testing.T) {
+	ff := newFakeFetcher()
+	url := "https://a.slack-edge.com/...1f44d.png"
+	key := EmojiCacheKey(url)
+
+	// First fetch fails. The inflight registration must clear so a
+	// subsequent Place call re-tries (otherwise a transient error
+	// would permanently freeze the placeholder).
+	first := make(chan struct{})
+	var once sync.Once
+	ff.fetchFn = func(ctx context.Context, req imgpkg.FetchRequest) (imgpkg.FetchResult, error) {
+		once.Do(func() { close(first) })
+		return imgpkg.FetchResult{}, errors.New("network down")
+	}
+
+	pctx := PlaceContext{Fetcher: ff, SendMsg: func(any) {}}
+
+	Place(pctx, url, 2)
+	<-first
+
+	// Give the deferred inflight cleanup time to run.
+	deadline := time.Now().Add(time.Second)
+	for {
+		inflightEmojiMu.Lock()
+		_, busy := inflightEmoji[key]
+		inflightEmojiMu.Unlock()
+		if !busy {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("inflight entry for %q never cleared after fetch error", key)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// A second Place call should issue a new fetch.
+	Place(pctx, url, 2)
+	deadline = time.Now().Add(time.Second)
+	for {
+		ff.mu.Lock()
+		n := len(ff.fetchCalls)
+		ff.mu.Unlock()
+		if n >= 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("second Place did not issue a retry fetch (n=%d)", n)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
