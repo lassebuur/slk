@@ -8,6 +8,7 @@ import (
 
 	"github.com/charmbracelet/x/ansi"
 	"github.com/gammons/slk/internal/config"
+	emojiutil "github.com/gammons/slk/internal/emoji"
 	imgpkg "github.com/gammons/slk/internal/image"
 	"github.com/gammons/slk/internal/ui/imgrender"
 	"github.com/gammons/slk/internal/ui/messages"
@@ -735,5 +736,47 @@ func TestThreadView_HasScrollbarWhenOverflowing(t *testing.T) {
 	// definitely draws.
 	if !strings.ContainsRune(view, '│') && !strings.ContainsRune(view, '█') {
 		t.Fatalf("expected scrollbar glyph in overflowing thread view; got:\n%s", view)
+	}
+}
+
+// TestThreadModel_SetEmojiContext_InvalidatesCache asserts that
+// SetEmojiContext on the thread Model bumps the cache version so any
+// View()-output consumer (App's panel-output cache) re-renders with
+// the new emoji-image context. Mirrors the messages-pane behavior
+// added in Phase 6.
+func TestThreadModel_SetEmojiContext_InvalidatesCache(t *testing.T) {
+	m := New()
+	parent := messages.MessageItem{TS: "1.0", UserName: "alice", Text: "hi"}
+	m.SetThread(parent, []messages.MessageItem{
+		{TS: "1.1", UserName: "alice", UserID: "U1", Text: "hi"},
+	}, "C1", "1.0")
+	_ = m.View(80, 24)
+
+	startVersion := m.Version()
+	m.SetEmojiContext(EmojiContext{
+		PlaceCtx: emojiutil.PlaceContext{},
+		Cells:    2,
+		Customs:  nil,
+	})
+	if m.Version() == startVersion {
+		t.Errorf("SetEmojiContext did not bump thread cache version")
+	}
+}
+
+// TestThreadModel_HandleEmojiImageReady_BumpsVersion asserts that an
+// emoji image landing (EmojiImageReadyMsg) invalidates the thread
+// render cache so the next View() picks up the now-warm placement.
+func TestThreadModel_HandleEmojiImageReady_BumpsVersion(t *testing.T) {
+	m := New()
+	parent := messages.MessageItem{TS: "1.0", UserName: "alice", Text: "hi"}
+	m.SetThread(parent, []messages.MessageItem{
+		{TS: "1.1", UserName: "alice", UserID: "U1", Text: "hi"},
+	}, "C1", "1.0")
+	_ = m.View(80, 24)
+
+	v0 := m.Version()
+	m.HandleEmojiImageReady("https://example.com/x.png")
+	if m.Version() == v0 {
+		t.Errorf("HandleEmojiImageReady did not bump thread cache version")
 	}
 }

@@ -190,6 +190,21 @@ type Model struct {
 	// renders placeholder-only) but does not support click-to-preview
 	// from a thread reply.
 	imgRenderer *imgrender.Renderer
+
+	// emojiCtx bundles the emoji-image rendering dependencies. Threaded
+	// through RenderSlackMarkdownWith for reply body text and consulted
+	// directly when building reply reaction pills. Configured at startup
+	// via Model.SetEmojiContext (mirrors messages.Model).
+	emojiCtx EmojiContext
+}
+
+// EmojiContext bundles the emoji-image rendering dependencies for the
+// thread pane. Mirrors messages.EmojiContext in shape and purpose —
+// see internal/ui/messages/model.go for the architectural rationale.
+type EmojiContext struct {
+	PlaceCtx emojiutil.PlaceContext
+	Cells    int               // 1 or 2; 0 falls back to 2
+	Customs  map[string]string // workspace custom emoji map; nil = empty
 }
 
 // New creates an empty thread panel.
@@ -207,6 +222,37 @@ func (m *Model) SetImageContext(ctx imgrender.ImageContext) {
 		m.imgRenderer = imgrender.NewRenderer()
 	}
 	m.imgRenderer.SetContext(ctx)
+	m.InvalidateCache()
+}
+
+// SetEmojiContext configures emoji-image rendering for thread replies.
+// Should be called once at startup (cmd/slk/main.go) and again after
+// CustomEmojisLoadedMsg arrives (via SetEmojiCustoms). Mirrors
+// messages.Model.SetEmojiContext.
+func (m *Model) SetEmojiContext(ctx EmojiContext) {
+	if ctx.Cells != 1 && ctx.Cells != 2 {
+		ctx.Cells = 2
+	}
+	m.emojiCtx = ctx
+	m.InvalidateCache()
+}
+
+// SetEmojiCustoms updates only the customs map on the active emoji
+// context, leaving PlaceCtx and Cells untouched. Invalidates the cache
+// so the new map is consulted on the next View(). Mirrors
+// messages.Model.SetEmojiCustoms.
+func (m *Model) SetEmojiCustoms(customs map[string]string) {
+	m.emojiCtx.Customs = customs
+	m.InvalidateCache()
+}
+
+// HandleEmojiImageReady is invoked by the host (App.Update) when an
+// emoji.EmojiImageReadyMsg lands. The same emoji can appear anywhere
+// in the open thread (body text or reaction pills), so v1 performs a
+// wholesale render-cache invalidation; the next View() rebuilds with
+// the now-warm emoji placement. Mirrors messages.Model.HandleEmojiImageReady.
+func (m *Model) HandleEmojiImageReady(url string) {
+	debuglog.ImgFetch("thread.HandleEmojiImageReady: url=%s wholesale_invalidate", url)
 	m.InvalidateCache()
 }
 
