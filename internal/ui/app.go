@@ -13,6 +13,7 @@ import (
 	"runtime"
 	"strings"
 	"time"
+	"unicode"
 
 	"charm.land/bubbles/v2/key"
 	tea "charm.land/bubbletea/v2"
@@ -771,7 +772,10 @@ func (a *App) copyPermalinkOfSelected() tea.Cmd {
 }
 
 func (a *App) saveThreadToFile() tea.Cmd {
-	if a.focusedPanel != PanelThread || a.threadPanel.IsEmpty() {
+	if a.focusedPanel != PanelThread {
+		return func() tea.Msg { return ToastMsg{Text: "Open a thread first"} }
+	}
+	if a.threadPanel.IsEmpty() {
 		return nil
 	}
 	parent := a.threadPanel.ParentMsg()
@@ -809,7 +813,7 @@ func sanitizeForFilename(s string) string {
 	var b strings.Builder
 	prev := false
 	for _, r := range s {
-		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_' {
 			b.WriteRune(r)
 			prev = false
 		} else if !prev {
@@ -817,7 +821,11 @@ func sanitizeForFilename(s string) string {
 			prev = true
 		}
 	}
-	return strings.Trim(b.String(), "-")
+	result := strings.Trim(b.String(), "-")
+	if result == "" {
+		return "unknown"
+	}
+	return result
 }
 
 func (a *App) handleDown() tea.Cmd {
