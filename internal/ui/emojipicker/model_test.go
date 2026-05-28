@@ -1,9 +1,13 @@
 package emojipicker
 
 import (
+	"context"
+	goimage "image"
+	"strings"
 	"testing"
 
 	"github.com/gammons/slk/internal/emoji"
+	imgpkg "github.com/gammons/slk/internal/image"
 )
 
 func sampleEntries() []emoji.EmojiEntry {
@@ -149,5 +153,48 @@ func TestViewNonEmptyWhenVisibleWithMatches(t *testing.T) {
 	m.Open("ro")
 	if m.View(40) == "" {
 		t.Error("expected non-empty view with matches")
+	}
+}
+
+type fakeDropdownFetcher struct {
+	prerender map[string]imgpkg.Render
+}
+
+func (f *fakeDropdownFetcher) Prerendered(key string, _ goimage.Point, _ imgpkg.Protocol) (imgpkg.Render, bool) {
+	r, ok := f.prerender[key]
+	return r, ok
+}
+func (f *fakeDropdownFetcher) Fetch(_ context.Context, _ imgpkg.FetchRequest) (imgpkg.FetchResult, error) {
+	return imgpkg.FetchResult{}, nil
+}
+
+func TestDropdown_View_ImageMode_UsesPlacement(t *testing.T) {
+	emoji.SetImageMode(true, 2)
+	t.Cleanup(func() { emoji.SetImageMode(false, 2) })
+
+	thumbURL := emoji.CDNBaseURL + "1f44d.png"
+	ff := &fakeDropdownFetcher{
+		prerender: map[string]imgpkg.Render{
+			emoji.EmojiCacheKey(thumbURL): {
+				Cells: goimage.Pt(2, 1),
+				Lines: []string{"\U0010EEEE\U0010EEEE"},
+			},
+		},
+	}
+
+	var m Model
+	m.SetEntries([]emoji.EmojiEntry{
+		{Name: "thumbsup", Display: "\U0001F44D"},
+		{Name: "thumbsdown", Display: "\U0001F44E"},
+	})
+	m.SetEmojiContext(EmojiContext{
+		PlaceCtx: emoji.PlaceContext{Fetcher: ff},
+		Cells:    2,
+	})
+	m.Open("thumbs")
+
+	out := m.View(40)
+	if !strings.Contains(out, "\U0010EEEE") {
+		t.Errorf("autocomplete View does not contain kitty placeholder runes\noutput=%q", out)
 	}
 }
