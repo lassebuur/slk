@@ -103,8 +103,57 @@ func Place(ctx PlaceContext, url string, cells int) (string, func(io.Writer) err
 		}
 	}
 
-	// Cold path — implemented in Task 5.6.
-	// For now, return a placeholder reservation without spawning a
-	// fetch so this task's tests pass in isolation.
+	// Cold path: kick off an async fetch (deduplicated per-URL across
+	// all concurrent Place calls), return a cells-wide space
+	// reservation. Width math reports the same value (cells) for both
+	// the warm and cold output, so the eventual swap doesn't shift
+	// layout.
+	spawnEmojiFetch(ctx, key, url, target)
 	return strings.Repeat(" ", cells), nil, true
+}
+
+// spawnEmojiFetch starts (at most) one fetch goroutine per URL. On
+// success, dispatches EmojiImageReadyMsg via ctx.SendMsg so the host
+// can re-render. The fetch's CellTarget triggers the fetcher's
+// prerender machinery (see Fetcher.maybePrerender) so subsequent
+// Place calls hit the warm path without further work on the UI
+// thread.
+func spawnEmojiFetch(ctx PlaceContext, key, url string, target goimage.Point) {
+	inflightEmojiMu.Lock()
+	if _, busy := inflightEmoji[key]; busy {
+		inflightEmojiMu.Unlock()
+		return
+	}
+	inflightEmoji[key] = struct{}{}
+	inflightEmojiMu.Unlock()
+
+	send := ctx.SendMsg
+	fetcher := ctx.Fetcher
+
+	go func() {
+		defer func() {
+			inflightEmojiMu.Lock()
+			delete(inflightEmoji, key)
+			inflightEmojiMu.Unlock()
+		}()
+
+		_, err := fetcher.Fetch(context.Background(), imgpkg.FetchRequest{
+			Key:        key,
+			URL:        url,
+			CellTarget: target, // triggers prerender into the kitty pipeline
+			// Target left zero: Slack emoji PNGs are already ~64px;
+			// the kitty prerender downscales to the cell-pixel target
+			// internally during RenderKey.
+		})
+		if err != nil {
+			// Fetcher logs the error in its own [imgfetch] surface;
+			// no need to duplicate here. The Place caller will keep
+			// rendering reservations on every frame until a successful
+			// fetch lands a prerender entry.
+			return
+		}
+		if send != nil {
+			send(EmojiImageReadyMsg{URL: url})
+		}
+	}()
 }

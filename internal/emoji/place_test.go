@@ -7,6 +7,7 @@ import (
 	"io"
 	"sync"
 	"testing"
+	"time"
 
 	imgpkg "github.com/gammons/slk/internal/image"
 )
@@ -157,3 +158,88 @@ func TestPlace_WarmPath_ReturnsKittyLine(t *testing.T) {
 type discardWriter struct{}
 
 func (discardWriter) Write(p []byte) (int, error) { return len(p), nil }
+
+func TestPlace_ColdPath_SpawnsFetch(t *testing.T) {
+	ff := newFakeFetcher()
+	url := "https://a.slack-edge.com/...1f44d.png"
+
+	// Configure fetch to succeed instantly. Prerender map is empty so
+	// Prerendered returns false — cold path triggered.
+	ff.fetchFn = func(ctx context.Context, req imgpkg.FetchRequest) (imgpkg.FetchResult, error) {
+		return imgpkg.FetchResult{}, nil
+	}
+
+	done := make(chan EmojiImageReadyMsg, 1)
+	pctx := PlaceContext{
+		Fetcher: ff,
+		SendMsg: func(m any) {
+			if r, ok := m.(EmojiImageReadyMsg); ok {
+				done <- r
+			}
+		},
+	}
+
+	got, flush, ok := Place(pctx, url, 2)
+	if !ok {
+		t.Fatalf("Place: ok=false, want true (cold path)")
+	}
+	if got != "  " {
+		t.Errorf("cold-path placement = %q, want %q (two spaces)", got, "  ")
+	}
+	if flush != nil {
+		t.Errorf("cold-path flush should be nil; got %T", flush)
+	}
+
+	// Wait for SendMsg to fire from the fetch goroutine.
+	select {
+	case msg := <-done:
+		if msg.URL != url {
+			t.Errorf("EmojiImageReadyMsg.URL = %q, want %q", msg.URL, url)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("SendMsg(EmojiImageReadyMsg) never fired within 1s")
+	}
+
+	// Exactly one fetch should have been issued.
+	if len(ff.fetchCalls) != 1 {
+		t.Errorf("fetcher.Fetch called %d times, want 1", len(ff.fetchCalls))
+	}
+	if got := ff.fetchCalls[0]; got.URL != url || got.Key != EmojiCacheKey(url) || got.CellTarget != goimage.Pt(2, 1) {
+		t.Errorf("FetchRequest = {Key:%q URL:%q CellTarget:%v}, want consistent with url and 2x1",
+			got.Key, got.URL, got.CellTarget)
+	}
+}
+
+func TestPlace_ColdPath_DedupsConcurrentCalls(t *testing.T) {
+	ff := newFakeFetcher()
+	url := "https://a.slack-edge.com/...1f44d.png"
+
+	gate := make(chan struct{})
+	ff.fetchFn = func(ctx context.Context, req imgpkg.FetchRequest) (imgpkg.FetchResult, error) {
+		<-gate // hold the fetch until the test releases it
+		return imgpkg.FetchResult{}, nil
+	}
+
+	pctx := PlaceContext{Fetcher: ff, SendMsg: func(any) {}}
+
+	// Fire 20 concurrent Place calls for the same URL.
+	var wg sync.WaitGroup
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			Place(pctx, url, 2)
+		}()
+	}
+
+	// Give goroutines a moment to enqueue their fetches.
+	time.Sleep(50 * time.Millisecond)
+	close(gate)
+	wg.Wait()
+
+	// All Place calls should have observed the in-flight dedup and
+	// only one Fetch should have actually been issued.
+	if len(ff.fetchCalls) != 1 {
+		t.Errorf("concurrent Place calls produced %d Fetch invocations, want 1 (dedup failed)", len(ff.fetchCalls))
+	}
+}
