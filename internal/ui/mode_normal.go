@@ -71,6 +71,12 @@ func handleNormalMode(a *App, msg tea.KeyMsg) tea.Cmd {
 	case key.Matches(msg, a.keys.ToggleSidebar):
 		a.ToggleSidebar()
 
+	case key.Matches(msg, a.keys.SidebarGrow):
+		a.sidebar.GrowWidth()
+
+	case key.Matches(msg, a.keys.SidebarShrink):
+		a.sidebar.ShrinkWidth()
+
 	case key.Matches(msg, a.keys.ToggleThread):
 		a.ToggleThread()
 
