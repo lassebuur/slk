@@ -7,8 +7,8 @@ import (
 
 func sampleGroups() []ReactionGroup {
 	return []ReactionGroup{
-		{Emoji: "thumbsup", Users: []string{"Alice", "Bob", "You (you)"}},
-		{Emoji: "eyes", Users: []string{"Carol"}},
+		{Emoji: "thumbsup", Users: []string{"Alice", "Bob", "You (you)"}, Count: 3},
+		{Emoji: "eyes", Users: []string{"Carol"}, Count: 1},
 	}
 }
 
@@ -80,6 +80,33 @@ func TestHandleKeyScrollClamps(t *testing.T) {
 	m.ViewOverlay(80, 40, strings.Repeat("\n", 40))
 	if m.Offset() != 0 {
 		t.Fatalf("offset should re-clamp to 0 when all content fits, got %d", m.Offset())
+	}
+}
+
+func TestCountLabelKnownVsTotal(t *testing.T) {
+	// Equal known/total -> plain number.
+	if got := countLabel(3, 3); got != "3" {
+		t.Fatalf("countLabel(3,3) = %q, want \"3\"", got)
+	}
+	// Unset total (0) falls back to known.
+	if got := countLabel(3, 0); got != "3" {
+		t.Fatalf("countLabel(3,0) = %q, want \"3\"", got)
+	}
+	// Slack reported more reactors than we have cached -> known/total.
+	if got := countLabel(3, 8); got != "3/8" {
+		t.Fatalf("countLabel(3,8) = %q, want \"3/8\"", got)
+	}
+}
+
+func TestViewOverlayRendersTruncatedCount(t *testing.T) {
+	m := New()
+	// Slack says 8 reacted but only 2 user IDs are cached.
+	m.Open([]ReactionGroup{
+		{Emoji: "thumbsup", Users: []string{"Alice", "Bob"}, Count: 8},
+	})
+	out := m.ViewOverlay(80, 24, strings.Repeat("\n", 24))
+	if !strings.Contains(out, "2/8") {
+		t.Fatalf("expected header to show known/total \"2/8\", got:\n%s", out)
 	}
 }
 

@@ -744,7 +744,7 @@ func (a *App) buildReactionGroups(reactions []messages.ReactionItem) []reactions
 			}
 			users = append(users, name)
 		}
-		groups = append(groups, reactionsview.ReactionGroup{Emoji: r.Emoji, Users: users})
+		groups = append(groups, reactionsview.ReactionGroup{Emoji: r.Emoji, Users: users, Count: r.Count})
 	}
 	return groups
 }

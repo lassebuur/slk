@@ -22,9 +22,16 @@ import (
 // ReactionGroup is one emoji and the resolved display names of the users who
 // reacted with it. The current user's name is expected to already carry a
 // "(you)" suffix when assembled by the caller.
+//
+// Count is the authoritative reaction count reported by Slack. It can exceed
+// len(Users) because Slack truncates the per-reaction users list in
+// conversations.history responses (we are cache-only by design). When they
+// differ the header renders "known/total" so the modal never silently
+// under-reports.
 type ReactionGroup struct {
 	Emoji string
 	Users []string
+	Count int
 }
 
 // Model is the reactions-list overlay state.
@@ -101,13 +108,25 @@ func (m *Model) contentLines(bg color.Color, innerWidth int) []string {
 
 	var lines []string
 	for _, g := range m.groups {
-		header := emojiGlyph(g.Emoji) + "  (" + strconv.Itoa(len(g.Users)) + ")"
+		header := emojiGlyph(g.Emoji) + "  (" + countLabel(len(g.Users), g.Count) + ")"
 		lines = append(lines, headerStyle.Width(innerWidth).Render(fit(header, innerWidth)))
 		for _, u := range g.Users {
 			lines = append(lines, userStyle.Width(innerWidth).Render(fit("  "+u, innerWidth)))
 		}
 	}
 	return lines
+}
+
+// countLabel renders the header count for a reaction group. It shows the plain
+// number of listed reactors when that matches the authoritative total, and
+// "known/total" when Slack reported a higher count than the users we have
+// cached (truncated history responses), so the modal never silently
+// under-reports. A zero/unset total falls back to the known count.
+func countLabel(known, total int) string {
+	if total > known {
+		return strconv.Itoa(known) + "/" + strconv.Itoa(total)
+	}
+	return strconv.Itoa(known)
 }
 
 // fit truncates s with an ellipsis tail when it is wider than width, so a long

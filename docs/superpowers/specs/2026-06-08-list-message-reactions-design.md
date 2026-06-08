@@ -75,6 +75,11 @@ Content is grouped by emoji with a per-emoji count and is scrollable when long:
 - Emojis are rendered the same way the existing reaction pills render them.
 - Scroll with `↑/↓` and `j/k`; close with `esc` (or `L` toggles closed).
 - Read-only: no actions from within the modal.
+- The per-emoji header count shows the number of listed (cached) reactors. When
+  Slack's authoritative count is higher than the cached user list (Slack
+  truncates the per-reaction `users` array in `conversations.history`
+  responses), the header shows `known/total` (e.g. `(2/8)`) so the modal never
+  silently under-reports.
 
 ## Code structure
 
