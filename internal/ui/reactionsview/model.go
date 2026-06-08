@@ -11,6 +11,7 @@ import (
 
 	"charm.land/lipgloss/v2"
 	emoji "github.com/kyokomi/emoji/v2"
+	"github.com/muesli/reflow/truncate"
 
 	slkemoji "github.com/gammons/slk/internal/emoji"
 	"github.com/gammons/slk/internal/ui/messages"
@@ -101,12 +102,22 @@ func (m *Model) contentLines(bg color.Color, innerWidth int) []string {
 	var lines []string
 	for _, g := range m.groups {
 		header := emojiGlyph(g.Emoji) + "  (" + strconv.Itoa(len(g.Users)) + ")"
-		lines = append(lines, headerStyle.Width(innerWidth).Render(header))
+		lines = append(lines, headerStyle.Width(innerWidth).Render(fit(header, innerWidth)))
 		for _, u := range g.Users {
-			lines = append(lines, userStyle.Width(innerWidth).Render("  "+u))
+			lines = append(lines, userStyle.Width(innerWidth).Render(fit("  "+u, innerWidth)))
 		}
 	}
 	return lines
+}
+
+// fit truncates s with an ellipsis tail when it is wider than width, so a long
+// display name cannot wrap and throw off the modal's line accounting. Matches
+// the truncation discipline of the help/reactionpicker modals.
+func fit(s string, width int) string {
+	if width <= 0 || lipgloss.Width(s) <= width {
+		return s
+	}
+	return truncate.StringWithTail(s, uint(width), "\u2026")
 }
 
 // ViewOverlay composites the modal onto background. Returns background
