@@ -1,6 +1,9 @@
 package reactionsview
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func sampleGroups() []ReactionGroup {
 	return []ReactionGroup{
@@ -47,5 +50,21 @@ func TestHandleKeyScrollClamps(t *testing.T) {
 	}
 	if m.Offset() < 0 {
 		t.Fatalf("offset should never be negative, got %d", m.Offset())
+	}
+}
+
+func TestViewOverlayRendersNamesAndCounts(t *testing.T) {
+	m := New()
+	out := m.ViewOverlay(80, 24, "background")
+	if out != "background" {
+		t.Fatal("hidden modal should return background unchanged")
+	}
+
+	m.Open(sampleGroups())
+	out = m.ViewOverlay(80, 24, strings.Repeat("\n", 24))
+	for _, want := range []string{"Reactions", "Alice", "Bob", "Carol", "You (you)", "(3)", "(1)"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("rendered modal missing %q\n%s", want, out)
+		}
 	}
 }

@@ -4,6 +4,20 @@
 // cached per-user reaction data); the modal does not fetch anything itself.
 package reactionsview
 
+import (
+	"image/color"
+	"strconv"
+	"strings"
+
+	"charm.land/lipgloss/v2"
+	emoji "github.com/kyokomi/emoji/v2"
+
+	slkemoji "github.com/gammons/slk/internal/emoji"
+	"github.com/gammons/slk/internal/ui/messages"
+	"github.com/gammons/slk/internal/ui/overlay"
+	"github.com/gammons/slk/internal/ui/styles"
+)
+
 // ReactionGroup is one emoji and the resolved display names of the users who
 // reacted with it. The current user's name is expected to already carry a
 // "(you)" suffix when assembled by the caller.
@@ -61,4 +75,125 @@ func (m *Model) HandleKey(keyStr string) {
 			m.offset++
 		}
 	}
+}
+
+// emojiGlyph renders an emoji name as a Unicode glyph when it is a
+// composition-safe single codepoint, falling back to the :shortcode: form
+// (same primitive the reaction picker uses). Workspace custom emoji are not in
+// the built-in CodeMap and fall back to :name: which is the desired behavior.
+func emojiGlyph(name string) string {
+	code := ":" + name + ":"
+	if u, ok := emoji.CodeMap()[code]; ok {
+		u = strings.TrimRight(u, " ")
+		if slkemoji.ShouldRenderUnicode(u) {
+			return u
+		}
+	}
+	return code
+}
+
+// contentLines builds the full (unwindowed) list of rendered content lines:
+// an emoji header per group followed by one indented line per user.
+func (m *Model) contentLines(bg color.Color, innerWidth int) []string {
+	headerStyle := lipgloss.NewStyle().Background(bg).Foreground(styles.Primary).Bold(true)
+	userStyle := lipgloss.NewStyle().Background(bg).Foreground(styles.TextPrimary)
+
+	var lines []string
+	for _, g := range m.groups {
+		header := emojiGlyph(g.Emoji) + "  (" + strconv.Itoa(len(g.Users)) + ")"
+		lines = append(lines, headerStyle.Width(innerWidth).Render(header))
+		for _, u := range g.Users {
+			lines = append(lines, userStyle.Width(innerWidth).Render("  "+u))
+		}
+	}
+	return lines
+}
+
+// ViewOverlay composites the modal onto background. Returns background
+// unchanged when hidden.
+func (m *Model) ViewOverlay(termWidth, termHeight int, background string) string {
+	if !m.visible {
+		return background
+	}
+	box := m.renderBox(termWidth, termHeight)
+	if box == "" {
+		return background
+	}
+	result := overlay.DimmedOverlay(termWidth, termHeight, background, box, 0.5)
+	lines := strings.Split(result, "\n")
+	if len(lines) > termHeight {
+		lines = lines[:termHeight]
+	}
+	return strings.Join(lines, "\n")
+}
+
+func (m *Model) renderBox(termWidth, termHeight int) string {
+	if !m.visible {
+		return ""
+	}
+
+	overlayWidth := termWidth * 6 / 10
+	if overlayWidth < 30 {
+		overlayWidth = 30
+	}
+	if overlayWidth > 60 {
+		overlayWidth = 60
+	}
+	if overlayWidth > termWidth-2 {
+		overlayWidth = termWidth - 2
+	}
+	innerWidth := overlayWidth - 4 // border + padding
+
+	bg := styles.Background
+
+	title := lipgloss.NewStyle().
+		Bold(true).
+		Background(bg).
+		Foreground(styles.Primary).
+		Render("Reactions")
+
+	all := m.contentLines(bg, innerWidth)
+
+	// Visible window: leave headroom for title, blank, footer (~6 lines).
+	maxVisible := termHeight - 8
+	if maxVisible < 3 {
+		maxVisible = 3
+	}
+	if maxVisible > 24 {
+		maxVisible = 24
+	}
+
+	m.maxOff = len(all) - maxVisible
+	if m.maxOff < 0 {
+		m.maxOff = 0
+	}
+	if m.offset > m.maxOff {
+		m.offset = m.maxOff
+	}
+
+	end := m.offset + maxVisible
+	if end > len(all) {
+		end = len(all)
+	}
+	window := all[m.offset:end]
+
+	footer := lipgloss.NewStyle().
+		Background(bg).
+		Foreground(styles.TextMuted).
+		Render("\u2191/\u2193 scroll   esc close")
+
+	content := title + "\n\n" + strings.Join(window, "\n") + "\n\n" + footer
+
+	// Re-paint modal bg+fg after every ANSI reset so trailing/unstyled cells
+	// don't leak the dimmed app behind the overlay (same as help/picker).
+	content = messages.ReapplyBgAfterResets(content, messages.BgANSI()+messages.FgANSI())
+
+	return lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(styles.Primary).
+		BorderBackground(bg).
+		Background(bg).
+		Padding(1, 1).
+		Width(overlayWidth).
+		Render(content)
 }
