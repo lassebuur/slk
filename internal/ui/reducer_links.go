@@ -112,9 +112,6 @@ func (a *App) completePendingLinkNav(channelID string, authoritative bool) tea.C
 // when available, else a minimal stub that the ThreadRepliesLoadedMsg
 // handler backfills from cache once the fetch lands.
 func (a *App) openThreadForPermalink(channelID, threadTS string) tea.Cmd {
-	chID := ids.ChannelID(channelID)
-	tTS := ids.ThreadTS(threadTS)
-
 	parent := messages.MessageItem{TS: threadTS, ThreadTS: threadTS}
 	if channelID == a.activeChannelID {
 		for _, m := range a.messagepane.Messages() {
@@ -125,26 +122,10 @@ func (a *App) openThreadForPermalink(channelID, threadTS string) tea.Cmd {
 		}
 	}
 	if parent.Text == "" {
-		if cached := a.threads.CacheRead(chID, tTS); len(cached) > 0 {
+		if cached := a.threads.CacheRead(ids.ChannelID(channelID), ids.ThreadTS(threadTS)); len(cached) > 0 {
 			parent = cached[0]
 		}
 	}
 
-	a.threadVisible = true
-	a.statusbar.SetInThread(true)
-	a.focusedPanel = PanelThread
-	a.threadPanel.SetThread(parent, nil, channelID, threadTS)
-	a.threadCompose.SetChannel("thread")
-	a.applyThreadUnreadBoundary(channelID)
-
-	threads := a.threads
-	var batch []tea.Cmd
-	if cached := threads.CacheRead(chID, tTS); len(cached) > 1 {
-		replies := cached[1:] // strip parent; reducer expects replies-only
-		batch = append(batch, func() tea.Msg {
-			return ThreadRepliesLoadedMsg{ThreadTS: threadTS, Replies: replies}
-		})
-	}
-	batch = append(batch, func() tea.Msg { return threads.Fetch(chID, tTS) })
-	return tea.Batch(batch...)
+	return a.openThreadPanel(parent, channelID, threadTS)
 }

@@ -2,6 +2,7 @@ package ui
 
 import (
 	"testing"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -179,6 +180,44 @@ func TestMessagesLoaded_CompletesPendingNav(t *testing.T) {
 	}
 	if app.pendingLinkNav != nil {
 		t.Errorf("pendingLinkNav not cleared: %+v", app.pendingLinkNav)
+	}
+}
+
+func TestOpenLink_OtherChannel_FreshCacheMissingTS_Toasts(t *testing.T) {
+	app, _ := linkTestApp(t)
+	app.activeChannelID = "CELSEWHERE"
+	// Wire C054JFCBN69 as a tier-1 "fresh" channel (synced just now, so
+	// reduceChannelSelected renders cache and fires NO fetch) whose
+	// cached buffer does NOT contain the permalink's target ts.
+	app.setChannelCacheReaderForTest(func(channelID ids.ChannelID) []messages.MessageItem {
+		if channelID == "C054JFCBN69" {
+			return []messages.MessageItem{{TS: "1779284734.000000", Text: "newer only"}}
+		}
+		return nil
+	})
+	app.setChannelSyncedAtReaderForTest(func(channelID ids.ChannelID) int64 {
+		return time.Now().Unix()
+	})
+
+	_, cmd := app.Update(OpenLinkMsg{URL: "https://myteam.slack.com/archives/C054JFCBN69/p1779284733270139"})
+	// routeLink dispatched a ChannelSelectedMsg; feed it back through Update
+	// (as the real program loop would) and collect any resulting toast.
+	toastFound := false
+	for _, m := range drainCmd(cmd) {
+		if cs, ok := m.(ChannelSelectedMsg); ok {
+			_, c2 := app.Update(cs)
+			for _, mm := range drainCmd(c2) {
+				if _, ok := mm.(ToastMsg); ok {
+					toastFound = true
+				}
+			}
+		}
+	}
+	if !toastFound {
+		t.Errorf("expected a toast when permalink targets a ts missing from a fresh-cache channel")
+	}
+	if app.pendingLinkNav != nil {
+		t.Errorf("pendingLinkNav leaked on tier-1 fresh path: %+v", app.pendingLinkNav)
 	}
 }
 

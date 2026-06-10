@@ -1306,25 +1306,33 @@ func (a *App) openThreadForSelectedMessage() tea.Cmd {
 	if msg.ThreadTS != "" && msg.ThreadTS != msg.TS {
 		threadTS = msg.ThreadTS
 	}
+	return a.openThreadPanel(msg, a.activeChannelID, threadTS)
+}
+
+// openThreadPanel makes the thread panel visible for (channelID,
+// threadTS) with the given parent row, primes replies from the thread
+// cache, and returns a cmd that fetches authoritative replies. Shared
+// by openThreadForSelectedMessage (parent taken from the pane buffer)
+// and openThreadForPermalink (parent reconstructed from cache/stub).
+func (a *App) openThreadPanel(parent messages.MessageItem, channelID, threadTS string) tea.Cmd {
 	a.threadVisible = true
 	a.statusbar.SetInThread(true)
 	a.focusedPanel = PanelThread
-	a.threadPanel.SetThread(msg, nil, a.activeChannelID, threadTS)
+	a.threadPanel.SetThread(parent, nil, channelID, threadTS)
 	a.threadCompose.SetChannel("thread")
-	a.applyThreadUnreadBoundary(a.activeChannelID)
+	a.applyThreadUnreadBoundary(channelID)
 
 	threads := a.threads
-	chID := ids.ChannelID(a.activeChannelID)
-	ts := ids.ThreadTS(threadTS)
-	parentTS := threadTS
+	chID := ids.ChannelID(channelID)
+	tTS := ids.ThreadTS(threadTS)
 	var batch []tea.Cmd
-	if cached := threads.CacheRead(chID, ts); len(cached) > 1 {
+	if cached := threads.CacheRead(chID, tTS); len(cached) > 1 {
 		replies := cached[1:] // strip parent; reducer expects replies-only
 		batch = append(batch, func() tea.Msg {
-			return ThreadRepliesLoadedMsg{ThreadTS: parentTS, Replies: replies}
+			return ThreadRepliesLoadedMsg{ThreadTS: threadTS, Replies: replies}
 		})
 	}
-	batch = append(batch, func() tea.Msg { return threads.Fetch(chID, ts) })
+	batch = append(batch, func() tea.Msg { return threads.Fetch(chID, tTS) })
 	return tea.Batch(batch...)
 }
 
@@ -1943,20 +1951,26 @@ func openInSystemViewerCmd(path string) tea.Cmd {
 		if path == "" {
 			return nil
 		}
-		var cmd *exec.Cmd
-		switch runtime.GOOS {
-		case "darwin":
-			cmd = exec.Command("open", path)
-		case "windows":
-			cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", path)
-		default:
-			cmd = exec.Command("xdg-open", path)
-		}
-		if err := cmd.Start(); err != nil {
+		if err := launchOS(path); err != nil {
 			log.Printf("system viewer launch failed: %v", err)
 		}
 		return nil
 	}
+}
+
+// launchOS starts the platform's default handler for target (a URL or
+// file path): open (macOS), rundll32 (Windows), xdg-open (Linux).
+func launchOS(target string) error {
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "darwin":
+		cmd = exec.Command("open", target)
+	case "windows":
+		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", target)
+	default:
+		cmd = exec.Command("xdg-open", target)
+	}
+	return cmd.Start()
 }
 
 // openURLCmd asynchronously launches the OS default browser for url.
@@ -1968,16 +1982,7 @@ func openURLCmd(url string) tea.Cmd {
 		if url == "" {
 			return nil
 		}
-		var cmd *exec.Cmd
-		switch runtime.GOOS {
-		case "darwin":
-			cmd = exec.Command("open", url)
-		case "windows":
-			cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", url)
-		default:
-			cmd = exec.Command("xdg-open", url)
-		}
-		if err := cmd.Start(); err != nil {
+		if err := launchOS(url); err != nil {
 			log.Printf("browser launch failed: %v", err)
 			return ToastMsg{Text: "Failed to open link"}
 		}
