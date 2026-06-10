@@ -309,6 +309,11 @@ func (m *Model) SetThread(parent messages.MessageItem, replies []messages.Messag
 	} else {
 		m.selected = 0
 	}
+	// Force the next View() to re-snap the viewport to the new selection.
+	// Without this, opening a thread whose newest-reply index matches the
+	// previously-viewed thread's snapped selection skips the snap and leaves
+	// the viewport scrolled to the top. Mirrors messages.Model.SetMessages.
+	m.hasSnapped = false
 	m.InvalidateCache()
 }
 
