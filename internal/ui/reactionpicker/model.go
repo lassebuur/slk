@@ -6,7 +6,6 @@ import (
 	"strings"
 
 	"charm.land/lipgloss/v2"
-	emoji "github.com/kyokomi/emoji/v2"
 	"github.com/muesli/reflow/truncate"
 
 	slkemoji "github.com/gammons/slk/internal/emoji"
@@ -87,7 +86,7 @@ func New() *Model {
 }
 
 func (m *Model) buildEmojiList() {
-	codeMap := emoji.CodeMap()
+	codeMap := slkemoji.CodeMap()
 	seen := make(map[string]bool)
 	m.allEmoji = make([]EmojiEntry, 0, len(codeMap))
 
@@ -287,9 +286,15 @@ func (m *Model) HandleKey(keyStr string) *ReactionResult {
 			return nil
 		}
 		selected := list[m.selected]
+		// Canonicalize to the name Slack's reactions API accepts: the
+		// picker is built from kyokomi/emoji's CLDR-aliased CodeMap, but
+		// Slack rejects those aliases (e.g. "thumbs_up") as invalid_name.
+		// Existing reactions are also stored under canonical names, so
+		// canonicalizing here makes add/remove detection match too.
+		name := slkemoji.CanonicalSlackName(selected.Name, m.emojiCtx.Customs)
 		return &ReactionResult{
-			Emoji:  selected.Name,
-			Remove: m.isExistingReaction(selected.Name),
+			Emoji:  name,
+			Remove: m.isExistingReaction(name),
 		}
 
 	case "up":
