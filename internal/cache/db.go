@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/gammons/slk/internal/debuglog"
 	_ "modernc.org/sqlite"
 )
 
@@ -232,6 +233,7 @@ func (db *DB) migrate() error {
 	// driver builds; search degrades to LIKE rather than failing
 	// startup.
 	if err := db.migrateSearch(); err != nil {
+		debuglog.Cache("migrateSearch failed, degrading to LIKE search: %v", err)
 		db.ftsDisabled = true
 	}
 

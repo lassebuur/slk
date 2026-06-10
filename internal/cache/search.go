@@ -4,6 +4,11 @@
 // kept in sync by AFTER INSERT/UPDATE/DELETE triggers (the standard
 // FTS5 external-content pattern). Soft deletes (is_deleted=1) do not
 // touch text, so query time filters them via a join back to messages.
+//
+// WARNING: messages has a TEXT composite PK, so it uses implicit
+// rowids, and VACUUM may renumber them — desyncing the external-content
+// mapping. Do not VACUUM this database without rebuilding the index via
+// INSERT INTO messages_fts(messages_fts) VALUES('rebuild').
 package cache
 
 import (

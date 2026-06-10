@@ -6,10 +6,11 @@ import (
 	"testing"
 )
 
-// ftsRowCount returns the number of rows in messages_fts joined back to
-// messages (external-content tables can't be counted directly without
-// a query term, so probe via a rowid join).
-func ftsRowCount(t *testing.T, db *DB) int {
+// ftsHelloMatches counts indexed messages matching the prefix term
+// "hello"* via a rowid join back to messages (external-content tables
+// can't be enumerated without a query term, so tests probe with a
+// known token).
+func ftsHelloMatches(t *testing.T, db *DB) int {
 	t.Helper()
 	var n int
 	err := db.conn.QueryRow(
@@ -51,7 +52,7 @@ func TestFTSTriggers_InsertUpdateDelete(t *testing.T) {
 	if err := db.UpsertMessage(msg); err != nil {
 		t.Fatal(err)
 	}
-	if got := ftsRowCount(t, db); got != 1 {
+	if got := ftsHelloMatches(t, db); got != 1 {
 		t.Fatalf("after insert: fts matches = %d, want 1", got)
 	}
 
@@ -60,7 +61,7 @@ func TestFTSTriggers_InsertUpdateDelete(t *testing.T) {
 	if err := db.UpsertMessage(msg); err != nil {
 		t.Fatal(err)
 	}
-	if got := ftsRowCount(t, db); got != 0 {
+	if got := ftsHelloMatches(t, db); got != 0 {
 		t.Fatalf("after edit: stale 'hello' match still present (%d)", got)
 	}
 
@@ -120,7 +121,7 @@ func TestFTSBackfillOnPreExistingDB(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	if got := ftsRowCount(t, db); got != 1 {
+	if got := ftsHelloMatches(t, db); got != 1 {
 		t.Fatalf("backfill: fts matches = %d, want 1", got)
 	}
 }
@@ -241,12 +242,17 @@ func TestSearchChannelMessages_LikeFallback(t *testing.T) {
 		t.Fatalf("LIKE fallback: got %v", got)
 	}
 
-	// LIKE wildcards in user input must be escaped, not interpreted.
-	got, err = db.SearchChannelMessages("C1", "T1", "%")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(got) != 0 {
-		t.Fatalf("LIKE escape: %% matched %v", got)
+	// LIKE wildcards and the escape character in user input must be
+	// escaped, not interpreted. No seeded message contains a literal
+	// '%', '_', or '\'; if they leaked through as wildcards, "%" and
+	// "_" would match every row and "c_f" would match "café".
+	for _, q := range []string{"%", "_", `\`, "c_f"} {
+		got, err = db.SearchChannelMessages("C1", "T1", q)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(got) != 0 {
+			t.Fatalf("LIKE escape: %q matched %v", q, got)
+		}
 	}
 }
