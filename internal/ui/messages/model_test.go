@@ -72,7 +72,7 @@ func TestMessagePaneAppend(t *testing.T) {
 // follows the glyph verbatim.
 func TestHeaderGlyph_ByChannelType(t *testing.T) {
 	cases := []struct {
-		chType   string
+		chType    string
 		wantGlyph string
 	}{
 		{"channel", "#"},
@@ -1156,10 +1156,10 @@ func TestPatchUserName_InvalidatesCacheEvenWithNoMatchingMessages(t *testing.T) 
 func TestHitTestReaction_OnPill(t *testing.T) {
 	msgs := []MessageItem{
 		{
-			TS:       "1700000001.000000",
-			UserID:   "U1",
-			UserName: "alice",
-			Text:     "hello",
+			TS:        "1700000001.000000",
+			UserID:    "U1",
+			UserName:  "alice",
+			Text:      "hello",
 			Timestamp: "10:30 AM",
 			Reactions: []ReactionItem{
 				{Emoji: "thumbsup", Count: 1, HasReacted: false},
@@ -1402,6 +1402,56 @@ func TestUpdateReactionMaintainsUserIDs(t *testing.T) {
 	msg, _ = m.SelectedMessage()
 	if len(msg.Reactions) != 0 {
 		t.Fatalf("want 0 reactions after all removed, got %d", len(msg.Reactions))
+	}
+}
+
+// TestUpdateReactionIdempotentAndHasReacted covers the live-reaction fix:
+// an optimistic self-update plus its WS echo must collapse to one count,
+// reactions made by the current user from another device still apply, and
+// HasReacted reflects only the current user.
+func TestUpdateReactionIdempotentAndHasReacted(t *testing.T) {
+	m := New([]MessageItem{{TS: "100.0", Text: "hi"}}, "general")
+	m.SetCurrentUser("ME")
+
+	// Self reaction (optimistic) then the WS echo of the same reaction:
+	// must NOT double-count.
+	m.UpdateReaction("100.0", "tada", "ME", false)
+	m.UpdateReaction("100.0", "tada", "ME", false)
+	msg, _ := m.SelectedMessage()
+	if len(msg.Reactions) != 1 || msg.Reactions[0].Count != 1 {
+		t.Fatalf("self add + echo: want one reaction count 1, got %+v", msg.Reactions)
+	}
+	if !msg.Reactions[0].HasReacted {
+		t.Errorf("want HasReacted=true for current user's reaction")
+	}
+
+	// Another user adds the same emoji: count 2, HasReacted stays true.
+	m.UpdateReaction("100.0", "tada", "OTHER", false)
+	msg, _ = m.SelectedMessage()
+	if msg.Reactions[0].Count != 2 {
+		t.Errorf("want count 2 after other user adds, got %d", msg.Reactions[0].Count)
+	}
+	if !msg.Reactions[0].HasReacted {
+		t.Errorf("HasReacted should remain true (current user still reacted)")
+	}
+
+	// Reaction by another user only: must not be flagged HasReacted.
+	m.UpdateReaction("100.0", "eyes", "OTHER", false)
+	msg, _ = m.SelectedMessage()
+	for _, r := range msg.Reactions {
+		if r.Emoji == "eyes" {
+			if r.HasReacted {
+				t.Errorf("other-user-only reaction must have HasReacted=false")
+			}
+			// Absent-user remove must not under-count.
+			m.UpdateReaction("100.0", "eyes", "ME", true)
+			msg2, _ := m.SelectedMessage()
+			for _, r2 := range msg2.Reactions {
+				if r2.Emoji == "eyes" && r2.Count != 1 {
+					t.Errorf("absent-user remove changed count to %d, want 1", r2.Count)
+				}
+			}
+		}
 	}
 }
 

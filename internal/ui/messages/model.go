@@ -278,6 +278,11 @@ type Model struct {
 	reactionNavActive bool
 	reactionNavIndex  int
 
+	// currentUserID is the authenticated user; UpdateReaction uses it to
+	// set ReactionItem.HasReacted only for the current user's own
+	// reactions (not other users'). Empty until SetCurrentUser is called.
+	currentUserID string
+
 	lastReadTS string
 
 	// version increments on every state change that could alter rendered
@@ -1150,12 +1155,20 @@ func (m *Model) UpdateReaction(messageTS, emojiName, userID string, remove bool)
 			if remove {
 				for j, r := range msg.Reactions {
 					if r.Emoji == emojiName {
+						// Idempotent: only decrement if userID was actually
+						// present (a duplicate WS echo must not under-count).
+						newIDs := RemoveUserID(r.UserIDs, userID)
+						if len(newIDs) == len(r.UserIDs) {
+							break // userID wasn't reacting; nothing to do
+						}
+						r.UserIDs = newIDs
 						r.Count--
-						r.UserIDs = RemoveUserID(r.UserIDs, userID)
+						if userID == m.currentUserID {
+							r.HasReacted = false
+						}
 						if r.Count <= 0 {
 							m.messages[i].Reactions = append(msg.Reactions[:j], msg.Reactions[j+1:]...)
 						} else {
-							r.HasReacted = false
 							m.messages[i].Reactions[j] = r
 						}
 						break
@@ -1165,9 +1178,17 @@ func (m *Model) UpdateReaction(messageTS, emojiName, userID string, remove bool)
 				found := false
 				for j, r := range msg.Reactions {
 					if r.Emoji == emojiName {
-						r.Count++
-						r.HasReacted = true
-						r.UserIDs = AppendUserID(r.UserIDs, userID)
+						// Idempotent: only increment if userID is newly
+						// added, so our own optimistic update + the WS echo
+						// of the same reaction don't double-count.
+						newIDs := AppendUserID(r.UserIDs, userID)
+						if len(newIDs) != len(r.UserIDs) {
+							r.UserIDs = newIDs
+							r.Count++
+						}
+						if userID == m.currentUserID {
+							r.HasReacted = true
+						}
 						m.messages[i].Reactions[j] = r
 						found = true
 						break
@@ -1177,7 +1198,7 @@ func (m *Model) UpdateReaction(messageTS, emojiName, userID string, remove bool)
 					m.messages[i].Reactions = append(m.messages[i].Reactions, ReactionItem{
 						Emoji:      emojiName,
 						Count:      1,
-						HasReacted: true,
+						HasReacted: userID == m.currentUserID,
 						UserIDs:    AppendUserID(nil, userID),
 					})
 				}
@@ -1250,6 +1271,12 @@ func (m *Model) SetUserNames(names map[string]string) {
 	m.userNames = names
 	m.cache = nil // invalidate cache so mentions re-render
 	m.dirty()
+}
+
+// SetCurrentUser records the authenticated user ID so UpdateReaction can
+// flag the current user's own reactions (HasReacted) correctly.
+func (m *Model) SetCurrentUser(userID string) {
+	m.currentUserID = userID
 }
 
 // PatchUserName updates the in-memory userNames map (used for @mention

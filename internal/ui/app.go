@@ -2180,6 +2180,8 @@ func (a *App) SetReactionService(r ReactionService) {
 func (a *App) SetCurrentUserID(userID string) {
 	a.currentUserID = userID
 	a.threadsView.SetSelfUserID(userID)
+	a.messagepane.SetCurrentUser(userID)
+	a.threadPanel.SetCurrentUser(userID)
 }
 
 // SetNowTimestampFormatter wires the formatter used to render the
