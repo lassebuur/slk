@@ -2299,3 +2299,52 @@ func TestSearchMessages_WrapsError(t *testing.T) {
 		t.Fatal("expected error")
 	}
 }
+
+func TestGetHistoryAround_FetchesBothDirections(t *testing.T) {
+	var calls []*slack.GetConversationHistoryParameters
+	mock := &mockSlackAPI{
+		getConversationHistoryFn: func(params *slack.GetConversationHistoryParameters) (*slack.GetConversationHistoryResponse, error) {
+			calls = append(calls, params)
+			if params.Latest != "" {
+				// older-or-equal page, newest first
+				return &slack.GetConversationHistoryResponse{Messages: []slack.Message{
+					{Msg: slack.Msg{Timestamp: "1700000005.000000"}},
+					{Msg: slack.Msg{Timestamp: "1700000004.000000"}},
+				}}, nil
+			}
+			// newer page, newest first
+			return &slack.GetConversationHistoryResponse{Messages: []slack.Message{
+				{Msg: slack.Msg{Timestamp: "1700000007.000000"}},
+				{Msg: slack.Msg{Timestamp: "1700000006.000000"}},
+			}}, nil
+		},
+	}
+	c := &Client{api: mock}
+
+	got, err := c.GetHistoryAround(context.Background(), "C1", "1700000005.000000", 25)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(calls) != 2 {
+		t.Fatalf("expected 2 history calls, got %d", len(calls))
+	}
+	older, newer := calls[0], calls[1]
+	if older.Latest != "1700000005.000000" || !older.Inclusive || older.Limit != 25 || older.ChannelID != "C1" {
+		t.Errorf("older call params: %+v", older)
+	}
+	if newer.Oldest != "1700000005.000000" || newer.Inclusive || newer.Limit != 25 {
+		t.Errorf("newer call params: %+v", newer)
+	}
+
+	// Combined newest-first: newer page then older page.
+	want := []string{"1700000007.000000", "1700000006.000000", "1700000005.000000", "1700000004.000000"}
+	if len(got) != len(want) {
+		t.Fatalf("got %d messages, want %d", len(got), len(want))
+	}
+	for i, ts := range want {
+		if got[i].Timestamp != ts {
+			t.Errorf("got[%d].Timestamp = %s, want %s", i, got[i].Timestamp, ts)
+		}
+	}
+}
