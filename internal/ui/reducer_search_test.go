@@ -8,6 +8,7 @@ package ui
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
@@ -307,6 +308,13 @@ func TestWorkspaceSearchSubmitAndResults(t *testing.T) {
 
 func TestWorkspaceSearchSelectNavigates(t *testing.T) {
 	app := searchTestApp(t)
+	// Lookup hit: the channel is known to the sidebar/finder (member).
+	app.setChannelLookupFuncForTest(func(id ids.ChannelID) (string, string, bool) {
+		if id == "C2" {
+			return "ops", "im", true
+		}
+		return "", "", false
+	})
 	app.Update(tea.KeyPressMsg{Code: 'f', Mod: tea.ModCtrl})
 	app.searchResults.HandleKey("q")
 	app.searchResults.HandleKey("enter")
@@ -325,8 +333,44 @@ func TestWorkspaceSearchSelectNavigates(t *testing.T) {
 	if selected == nil || selected.ID != "C2" {
 		t.Fatalf("no ChannelSelectedMsg dispatched: %v", msgs)
 	}
+	if selected.Name != "ops" || selected.Type != "im" {
+		t.Fatalf("ChannelSelectedMsg not resolved via Lookup: %+v", selected)
+	}
 	if app.pendingLinkNav == nil || app.pendingLinkNav.messageTS != "2.0" {
 		t.Fatalf("pending nav = %+v", app.pendingLinkNav)
+	}
+	if app.mode != ModeNormal || app.searchResults.IsVisible() {
+		t.Fatal("modal not closed")
+	}
+}
+
+func TestWorkspaceSearchSelectNonMemberToastsInsteadOfNavigating(t *testing.T) {
+	app := searchTestApp(t)
+	// No Lookup wired -> every Lookup misses: the hit is in a public
+	// channel the user hasn't joined (unknown to the sidebar/finder).
+	app.Update(tea.KeyPressMsg{Code: 'f', Mod: tea.ModCtrl})
+	app.searchResults.HandleKey("q")
+	app.searchResults.HandleKey("enter")
+	app.searchResults.SetResults([]searchresults.Item{
+		{ChannelID: "C9", ChannelName: "random", TS: "3.0"},
+	}, 1)
+
+	_, cmd := app.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	msgs := drainCmd(cmd)
+	var toast string
+	for _, m := range msgs {
+		switch tm := m.(type) {
+		case ChannelSelectedMsg:
+			t.Fatalf("navigated to non-member channel: %+v", tm)
+		case ToastMsg:
+			toast = tm.Text
+		}
+	}
+	if !strings.Contains(toast, "Not a member of #random") {
+		t.Fatalf("expected non-member toast, got %q (msgs: %v)", toast, msgs)
+	}
+	if app.pendingLinkNav != nil {
+		t.Fatalf("pendingLinkNav leaked: %+v", app.pendingLinkNav)
 	}
 	if app.mode != ModeNormal || app.searchResults.IsVisible() {
 		t.Fatal("modal not closed")

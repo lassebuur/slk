@@ -6,6 +6,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/gammons/slk/internal/ids"
 	"github.com/gammons/slk/internal/ui/channelfinder"
 	"github.com/gammons/slk/internal/ui/help"
 	"github.com/gammons/slk/internal/ui/searchresults"
@@ -119,6 +120,10 @@ func TestModalClick_WorkspaceSearchRowActivates(t *testing.T) {
 	app.width = 80
 	app.height = 24
 	app.activeChannelID = "C1"
+	// Lookup hit = member channel; a miss would toast instead of navigate.
+	app.setChannelLookupFuncForTest(func(id ids.ChannelID) (string, string, bool) {
+		return "dev", "channel", id == "C3"
+	})
 	app.searchResults.Open()
 	app.SetMode(ModeWorkspaceSearch)
 	app.searchResults.HandleKey("q")

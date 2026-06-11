@@ -1107,33 +1107,7 @@ func run() error {
 					Err:       err,
 				}
 			},
-			SearchWorkspace: func(query string) tea.Msg {
-				wctx := router.Active()
-				if wctx == nil {
-					return nil
-				}
-				res, err := wctx.Client.SearchMessages(context.Background(), query, 50)
-				if err != nil {
-					return ui.WorkspaceSearchResultsMsg{Query: query, Err: err}
-				}
-				items := make([]searchresults.Item, 0, len(res.Matches))
-				for _, match := range res.Matches {
-					threadTS := ""
-					if pl, ok := slackurl.Parse(match.Permalink); ok {
-						threadTS = string(pl.ThreadTS)
-					}
-					items = append(items, searchresults.Item{
-						ChannelID:   match.Channel.ID,
-						ChannelName: match.Channel.Name,
-						UserName:    match.Username,
-						TS:          match.Timestamp,
-						ThreadTS:    threadTS,
-						Text:        match.Text,
-						Timestamp:   formatTimestamp(match.Timestamp, tsFormat),
-					})
-				}
-				return ui.WorkspaceSearchResultsMsg{Query: query, Items: items, Total: res.Total}
-			},
+			SearchWorkspace: searchWorkspaceFunc(router, tsFormat),
 		}))
 
 		app.SetMessageService(ui.NewMessageService(ui.MessageServiceFuncs{
@@ -2841,6 +2815,48 @@ func fetchThreadReplies(client *slackclient.Client, channelID, threadTS string, 
 	debuglog.Cache("fetchThreadReplies: channel=%s thread_ts=%s result %s dur_ms=%d (authoritative replace)",
 		channelID, threadTS, summarizeMessages(out), time.Since(start).Milliseconds())
 	return out
+}
+
+// searchWorkspaceFunc builds the SearchService.SearchWorkspace
+// closure: a server-side search.messages query against the active
+// workspace. Always returns a WorkspaceSearchResultsMsg — a nil msg
+// would leave the ctrl+f modal spinner stuck (the reducer only exits
+// the loading state on a results msg).
+func searchWorkspaceFunc(router *workspaceRouter, tsFormat string) func(query string) tea.Msg {
+	return func(query string) tea.Msg {
+		wctx := router.Active()
+		if wctx == nil {
+			return ui.WorkspaceSearchResultsMsg{Query: query, Err: errors.New("no active workspace")}
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		res, err := wctx.Client.SearchMessages(ctx, query, 50)
+		if err != nil {
+			return ui.WorkspaceSearchResultsMsg{Query: query, Err: err}
+		}
+		items := make([]searchresults.Item, 0, len(res.Matches))
+		for _, match := range res.Matches {
+			// ThreadTS comes from the hit's permalink. Known v1
+			// limitation: a thread-reply hit with an unparseable
+			// permalink degrades to plain-message nav, which may
+			// toast "Message not found in loaded history" (replies
+			// aren't in channel history).
+			threadTS := ""
+			if pl, ok := slackurl.Parse(match.Permalink); ok {
+				threadTS = string(pl.ThreadTS)
+			}
+			items = append(items, searchresults.Item{
+				ChannelID:   match.Channel.ID,
+				ChannelName: match.Channel.Name,
+				UserName:    match.Username,
+				TS:          match.Timestamp,
+				ThreadTS:    threadTS,
+				Text:        match.Text,
+				Timestamp:   formatTimestamp(match.Timestamp, tsFormat),
+			})
+		}
+		return ui.WorkspaceSearchResultsMsg{Query: query, Items: items, Total: res.Total}
+	}
 }
 
 func formatTimestamp(ts, format string) string {
