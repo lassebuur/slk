@@ -9,6 +9,7 @@
 package ui
 
 import (
+	"fmt"
 	"strings"
 
 	"charm.land/bubbles/v2/key"
@@ -21,7 +22,14 @@ func handleSearchMode(a *App, msg tea.KeyMsg) tea.Cmd {
 	switch {
 	case key.Matches(msg, a.keys.Escape):
 		a.searchInput = ""
-		a.statusbar.SetSearch("")
+		// If a search is still active (the user re-entered `/` on
+		// top of existing results and bailed), restore its i/N
+		// indicator instead of blanking the segment.
+		if s := a.search; s != nil {
+			a.statusbar.SetSearch(fmt.Sprintf("/%s  %d/%d", s.query, s.idx+1, len(s.matches)))
+		} else {
+			a.statusbar.SetSearch("")
+		}
 		a.SetMode(ModeNormal)
 		return nil
 	case key.Matches(msg, a.keys.Enter):
@@ -34,10 +42,22 @@ func handleSearchMode(a *App, msg tea.KeyMsg) tea.Cmd {
 			return nil
 		}
 		a.statusbar.SetSearch("/" + query + "  …")
+		// New dispatch supersedes any in-flight query; stamp the
+		// result with this dispatch's generation so the reducer can
+		// drop late results from older queries (or ones the user
+		// cleared while pending). The Gen is attached here, UI-side,
+		// so the SearchService stays unaware of UI bookkeeping.
+		a.searchGen++
+		gen := a.searchGen
 		search := a.searchSvc
 		chID := a.activeChannelID
 		return func() tea.Msg {
-			return search.SearchChannel(ids.ChannelID(chID), query)
+			msg := search.SearchChannel(ids.ChannelID(chID), query)
+			if r, ok := msg.(ChannelSearchResultsMsg); ok {
+				r.Gen = gen
+				return r
+			}
+			return msg
 		}
 	}
 	// Text editing: append printable runes, backspace deletes.
@@ -52,6 +72,9 @@ func handleSearchMode(a *App, msg tea.KeyMsg) tea.Cmd {
 		// can be multi-term, so map it back.
 		a.searchInput += " "
 	default:
+		// Single-rune filter: accepts ordinary printable input but
+		// drops multi-rune graphemes (emoji ZWJ sequences, some IME
+		// commits arrive as multi-rune strings). Known v1 limitation.
 		if len([]rune(s)) == 1 {
 			a.searchInput += s
 		}

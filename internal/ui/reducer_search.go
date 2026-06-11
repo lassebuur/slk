@@ -21,6 +21,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/gammons/slk/internal/debuglog"
 	"github.com/gammons/slk/internal/ids"
 )
 
@@ -42,7 +43,14 @@ var reduceSearch reducerFunc = func(a *App, msg tea.Msg) (tea.Cmd, bool) {
 	if m.ChannelID != a.activeChannelID {
 		return nil, true // stale: channel changed since query
 	}
+	if m.Gen != a.searchGen {
+		// Superseded: the user cleared the search or dispatched a
+		// newer query while this one was in flight.
+		return nil, true
+	}
 	if m.Err != nil {
+		debuglog.General("ChannelSearchResultsMsg: channel=%s query=%q err=%v",
+			m.ChannelID, m.Query, m.Err)
 		a.clearActiveSearch()
 		return func() tea.Msg { return ToastMsg{Text: "Search failed"} }, true
 	}
@@ -91,32 +99,19 @@ func (a *App) jumpToCurrentMatch() tea.Cmd {
 	}
 }
 
-// searchNext moves to the next-older match (wrapping to newest);
-// searchPrev to the next-newer (wrapping to oldest). Both no-op
-// without an active search.
-func (a *App) searchNext() tea.Cmd {
+// searchStep moves the match selection by delta with wrap: +1 is the
+// next-older match (n, wrapping to newest), -1 the next-newer (N,
+// wrapping to oldest). No-op without an active search; toasts on wrap.
+func (a *App) searchStep(delta int) tea.Cmd {
 	s := a.search
 	if s == nil || len(s.matches) == 0 {
 		return nil
 	}
 	var wrapped bool
-	if s.idx++; s.idx >= len(s.matches) {
+	s.idx += delta
+	if s.idx >= len(s.matches) {
 		s.idx, wrapped = 0, true
-	}
-	cmd := a.jumpToCurrentMatch()
-	if wrapped {
-		return tea.Batch(cmd, func() tea.Msg { return ToastMsg{Text: "Search wrapped"} })
-	}
-	return cmd
-}
-
-func (a *App) searchPrev() tea.Cmd {
-	s := a.search
-	if s == nil || len(s.matches) == 0 {
-		return nil
-	}
-	var wrapped bool
-	if s.idx--; s.idx < 0 {
+	} else if s.idx < 0 {
 		s.idx, wrapped = len(s.matches)-1, true
 	}
 	cmd := a.jumpToCurrentMatch()

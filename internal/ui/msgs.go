@@ -90,12 +90,15 @@ type (
 	}
 	// ChannelSearchResultsMsg delivers in-channel FTS results for the `/`
 	// search. TSes are match timestamps newest-first; Terms are the folded
-	// query terms for highlighting. Empty TSes = no matches.
+	// query terms for highlighting. Empty TSes = no matches. Gen echoes
+	// App.searchGen at dispatch time (stamped UI-side in mode_search.go);
+	// the reducer drops results from a superseded generation.
 	ChannelSearchResultsMsg struct {
 		ChannelID string
 		Query     string
 		Terms     []string
 		TSes      []string
+		Gen       uint64
 		Err       error
 	}
 	NewMessageMsg struct {

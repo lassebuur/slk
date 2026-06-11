@@ -79,11 +79,13 @@ func handleNormalMode(a *App, msg tea.KeyMsg) tea.Cmd {
 		a.SetMode(ModeSearch)
 		return nil
 
-	case msg.String() == "n" && a.search != nil:
-		return a.searchNext()
+	// n/N match navigation: like `/`, scoped to the channel message
+	// pane in v1 — a no-op while the thread panel has focus.
+	case key.Matches(msg, a.keys.SearchNext) && a.search != nil && a.focusedPanel != PanelThread:
+		return a.searchStep(1)
 
-	case msg.String() == "N" && a.search != nil:
-		return a.searchPrev()
+	case key.Matches(msg, a.keys.SearchPrev) && a.search != nil && a.focusedPanel != PanelThread:
+		return a.searchStep(-1)
 
 	case key.Matches(msg, a.keys.Tab):
 		a.FocusNext()

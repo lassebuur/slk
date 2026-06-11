@@ -252,8 +252,12 @@ type App struct {
 
 	// search is the active in-channel search (nil = none).
 	// searchInput is the prompt buffer while in ModeSearch.
+	// searchGen is a monotonic generation counter: bumped on every
+	// dispatch and clear, echoed through ChannelSearchResultsMsg.Gen
+	// so stale in-flight results are dropped (see reducer_search.go).
 	search      *activeSearch
 	searchInput string
+	searchGen   uint64
 	searchSvc   SearchService
 
 	// browserOpener launches a URL in the OS browser. Defaults to
@@ -1725,13 +1729,15 @@ func (a *App) SetSearchService(s SearchService) {
 }
 
 // clearActiveSearch removes in-channel search state: highlights,
-// status segment, prompt buffer.
+// status segment, prompt buffer. It also invalidates any in-flight
+// query by bumping the generation counter. Always runs unguarded:
+// the status segment can be set without active state (e.g. the
+// "no matches" text), and the Set* calls below are no-ops when
+// already clear.
 func (a *App) clearActiveSearch() {
-	if a.search == nil && a.searchInput == "" {
-		return
-	}
 	a.search = nil
 	a.searchInput = ""
+	a.searchGen++
 	a.messagepane.SetSearchTerms(nil)
 	a.statusbar.SetSearch("")
 }

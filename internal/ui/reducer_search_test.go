@@ -163,3 +163,109 @@ func TestSearchModeEscCancels(t *testing.T) {
 		t.Fatalf("Esc: mode=%v input=%q", app.mode, app.searchInput)
 	}
 }
+
+func TestChannelSwitchClearsNoMatchesStatus(t *testing.T) {
+	app := searchTestApp(t)
+	app.Update(ChannelSearchResultsMsg{ChannelID: "C1", Query: "zzz"})
+	if app.statusbar.Search() == "" {
+		t.Fatal("precondition: no-matches status segment set")
+	}
+	app.Update(ChannelSelectedMsg{ID: "C2", Name: "other"})
+	if got := app.statusbar.Search(); got != "" {
+		t.Fatalf("statusbar search segment = %q after channel switch, want empty", got)
+	}
+}
+
+// searchDispatch drives the real `/` prompt flow: enters search mode,
+// types query, presses Enter, and returns the dispatch cmd (unrun, so
+// tests control when the "network" result lands).
+func searchDispatch(t *testing.T, app *App, query string) tea.Cmd {
+	t.Helper()
+	app.Update(tea.KeyPressMsg{Code: '/', Text: "/"})
+	for _, r := range query {
+		app.Update(tea.KeyPressMsg{Code: r, Text: string(r)})
+	}
+	_, cmd := app.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	return cmd
+}
+
+func TestSearchClearWhilePendingDropsLateResult(t *testing.T) {
+	app := searchTestApp(t)
+	app.SetSearchService(NewSearchService(SearchServiceFuncs{
+		SearchChannel: func(channelID ids.ChannelID, query string) tea.Msg {
+			return resultsMsg("1700000003.000000")
+		},
+	}))
+	cmd := searchDispatch(t, app, "deploy")
+	// User cancels (Esc / channel switch) while the query is in flight.
+	app.clearActiveSearch()
+	for _, m := range drainCmd(cmd) {
+		app.Update(m)
+	}
+	if app.search != nil {
+		t.Fatal("late result applied after clearActiveSearch")
+	}
+	if got := app.statusbar.Search(); got != "" {
+		t.Fatalf("statusbar search segment = %q, want empty", got)
+	}
+}
+
+func TestSearchNewDispatchSupersedesOldResult(t *testing.T) {
+	app := searchTestApp(t)
+	app.SetSearchService(NewSearchService(SearchServiceFuncs{
+		SearchChannel: func(channelID ids.ChannelID, query string) tea.Msg {
+			m := resultsMsg("1700000003.000000")
+			m.Query = query
+			return m
+		},
+	}))
+	cmdA := searchDispatch(t, app, "alpha")
+	cmdB := searchDispatch(t, app, "beta")
+	// A's result arrives after B was dispatched: superseded, dropped.
+	for _, m := range drainCmd(cmdA) {
+		app.Update(m)
+	}
+	if app.search != nil {
+		t.Fatalf("superseded result applied: %+v", app.search)
+	}
+	for _, m := range drainCmd(cmdB) {
+		app.Update(m)
+	}
+	if app.search == nil || app.search.query != "beta" {
+		t.Fatalf("current result not applied: %+v", app.search)
+	}
+}
+
+func TestPasteInSearchModeAppendsToInput(t *testing.T) {
+	app := searchTestApp(t)
+	app.Update(tea.KeyPressMsg{Code: '/', Text: "/"})
+	app.Update(tea.PasteMsg{Content: "deploy\r\nfailed"})
+	if app.searchInput != "deploy failed" {
+		t.Fatalf("searchInput = %q, want pasted text with newlines stripped", app.searchInput)
+	}
+	if got := app.statusbar.Search(); got != "/deploy failed" {
+		t.Fatalf("statusbar search segment = %q", got)
+	}
+}
+
+func TestSearchModeEscRestoresMatchIndicator(t *testing.T) {
+	app := searchTestApp(t)
+	app.Update(resultsMsg("1700000003.000000", "1700000001.000000"))
+	// Re-enter the `/` prompt, then bail out: the active search
+	// survives, so its i/N indicator should come back.
+	app.Update(tea.KeyPressMsg{Code: '/', Text: "/"})
+	app.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+	if got := app.statusbar.Search(); got != "/deploy  1/2" {
+		t.Fatalf("statusbar search segment = %q, want restored match indicator", got)
+	}
+}
+
+func TestSearchNextGatedOffThreadPanel(t *testing.T) {
+	app := searchTestApp(t)
+	app.Update(resultsMsg("1700000003.000000", "1700000001.000000"))
+	app.focusedPanel = PanelThread
+	app.Update(tea.KeyPressMsg{Code: 'n', Text: "n"})
+	if app.search == nil || app.search.idx != 0 {
+		t.Fatalf("n advanced search while thread focused: %+v", app.search)
+	}
+}

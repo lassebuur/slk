@@ -140,9 +140,21 @@ func (m *Model) SetSyncing(syncing bool) {
 	m.dirty()
 }
 
+// Search returns the current search segment text ("" when hidden).
+func (m *Model) Search() string { return m.search }
+
+// maxSearchWidth caps the search segment so a long query can't push
+// the bar's left half past the available width and wrap the line.
+const maxSearchWidth = 40
+
 // SetSearch sets the search segment rendered after the workspace name
 // (the `/query  3/17` indicator and live `/` prompt). "" hides it.
+// Text longer than maxSearchWidth runes is elided with a trailing "…"
+// (the segment is plain unstyled text, so a rune slice is safe).
 func (m *Model) SetSearch(s string) {
+	if r := []rune(s); len(r) > maxSearchWidth {
+		s = string(r[:maxSearchWidth-1]) + "…"
+	}
 	if m.search != s {
 		m.search = s
 		m.dirty()
