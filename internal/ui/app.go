@@ -909,6 +909,9 @@ func (a *App) copyPermalinkOfSelected() tea.Cmd {
 			return nil
 		}
 
+		if !a.clipboardAvailable {
+			return statusbar.PermalinkCopyFailedMsg{}
+		}
 		_ = clipboard.Write(clipboard.FmtText, []byte(url))
 
 		return statusbar.PermalinkCopiedMsg{}
