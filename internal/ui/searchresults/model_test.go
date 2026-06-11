@@ -1,8 +1,12 @@
 package searchresults
 
 import (
+	"fmt"
 	"strings"
 	"testing"
+
+	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 )
 
 func items() []Item {
@@ -10,6 +14,29 @@ func items() []Item {
 		{ChannelID: "C1", ChannelName: "general", UserName: "grant", TS: "1.0", Text: "deploy fine"},
 		{ChannelID: "C2", ChannelName: "ops", UserName: "sam", TS: "2.0", Text: "deploy bad", ThreadTS: "1.5"},
 	}
+}
+
+// manyItems builds n distinct results for scroll-window tests.
+func manyItems(n int) []Item {
+	out := make([]Item, n)
+	for i := range out {
+		out[i] = Item{
+			ChannelID:   fmt.Sprintf("C%d", i),
+			ChannelName: "general",
+			UserName:    "u",
+			TS:          fmt.Sprintf("%d.0", i),
+			Text:        fmt.Sprintf("msg %d", i),
+		}
+	}
+	return out
+}
+
+// submitQuery types q and presses enter, leaving the model in stateLoading.
+func submitQuery(m *Model, q string) {
+	for _, r := range q {
+		m.HandleKey(string(r))
+	}
+	m.HandleKey("enter")
 }
 
 func TestOpenStartsAtInput(t *testing.T) {
@@ -148,8 +175,215 @@ func TestViewSmoke(t *testing.T) {
 		t.Fatal("results View must show footer when total > len(items)")
 	}
 
+	// Re-submit so the error lands on an in-flight search (SetError is a
+	// no-op outside stateLoading).
+	m.HandleKey("x")
+	m.HandleKey("enter")
 	m.SetError("rate limited")
 	if out := m.View(80); !strings.Contains(out, "rate limited") {
 		t.Fatal("error View must show error message")
+	}
+}
+
+func TestEnterWhileLoadingIsNoop(t *testing.T) {
+	m := New()
+	m.Open()
+	for _, r := range "deploy" {
+		m.HandleKey(string(r))
+	}
+	if act := m.HandleKey("enter"); act != ActionSubmit {
+		t.Fatalf("first enter = %v, want ActionSubmit", act)
+	}
+	if act := m.HandleKey("enter"); act != ActionNone {
+		t.Fatalf("enter while loading = %v, want ActionNone", act)
+	}
+	if !m.Loading() {
+		t.Fatal("loading state must survive a re-pressed enter")
+	}
+}
+
+func TestCtrlPNNavigation(t *testing.T) {
+	m := New()
+	m.Open()
+	submitQuery(&m, "deploy")
+	m.SetResults(manyItems(3), 3)
+
+	m.HandleKey("ctrl+n")
+	m.HandleKey("ctrl+n")
+	if m.selected != 2 {
+		t.Fatalf("after 2x ctrl+n selected = %d, want 2", m.selected)
+	}
+	m.HandleKey("ctrl+p")
+	if m.selected != 1 {
+		t.Fatalf("after ctrl+p selected = %d, want 1", m.selected)
+	}
+}
+
+// gutterRune returns the rune in the scrollbar gutter column (just inside
+// the right padding/border) of the stripped, full-width line.
+func gutterRune(line string) rune {
+	r := []rune(line)
+	return r[len(r)-3]
+}
+
+func TestScrollbarAppearsOnOverflow(t *testing.T) {
+	m := New()
+	m.Open()
+	submitQuery(&m, "deploy")
+	m.SetResults(manyItems(50), 50)
+
+	lines := strings.Split(ansi.Strip(m.View(80)), "\n")
+	rows := lines[listTopOffset : listTopOffset+maxVisibleRows]
+	var thumbs, tracks int
+	for i, row := range rows {
+		switch gutterRune(row) {
+		case '█':
+			thumbs++
+		case '│':
+			tracks++
+		default:
+			t.Fatalf("row %d gutter = %q, want thumb or track", i, gutterRune(row))
+		}
+	}
+	if thumbs == 0 || tracks == 0 {
+		t.Fatalf("want proportional thumb and track, got %d thumbs / %d tracks", thumbs, tracks)
+	}
+	// Selection at the top: the thumb hugs the top of the gutter.
+	if gutterRune(rows[0]) != '█' {
+		t.Error("thumb should start at the top when the window is at the start")
+	}
+}
+
+func TestNoScrollbarWhenListFits(t *testing.T) {
+	m := New()
+	m.Open()
+	submitQuery(&m, "deploy")
+	m.SetResults(manyItems(3), 3)
+
+	lines := strings.Split(ansi.Strip(m.View(80)), "\n")
+	for i, row := range lines[listTopOffset : listTopOffset+3] {
+		if g := gutterRune(row); g != ' ' {
+			t.Fatalf("row %d gutter = %q, want blank (no scrollbar)", i, g)
+		}
+	}
+}
+
+func TestSnippetSanitization(t *testing.T) {
+	m := New()
+	m.Open()
+	submitQuery(&m, "deploy")
+	m.SetResults([]Item{
+		{ChannelID: "C1", ChannelName: "general", UserName: "u", TS: "1.0",
+			Text: "a\tb\rc\nd\x07e"},
+	}, 1)
+
+	plain := ansi.Strip(m.View(80))
+	if !strings.Contains(plain, "a bc de") {
+		t.Fatalf("snippet not sanitized; view:\n%s", plain)
+	}
+}
+
+func TestLongQueryDoesNotWrapBox(t *testing.T) {
+	m := New()
+	m.Open()
+	for i := 0; i < 200; i++ {
+		m.HandleKey("x")
+	}
+	m.HandleKey("!") // distinctive tail rune
+
+	box := m.renderBox(80)
+	w, h := m.BoxSize(80, 24)
+	if gw := lipgloss.Width(box); gw != w {
+		t.Errorf("rendered width = %d, BoxSize width = %d", gw, w)
+	}
+	if gh := lipgloss.Height(box); gh != h {
+		t.Errorf("rendered height = %d, BoxSize height = %d (input line wrapped?)", gh, h)
+	}
+	// The tail of the query and the cursor stay visible.
+	if plain := ansi.Strip(box); !strings.Contains(plain, "x!█") {
+		t.Error("input truncation must keep the query tail and cursor visible")
+	}
+}
+
+func TestErrorNewlinesFlattened(t *testing.T) {
+	m := New()
+	m.Open()
+	submitQuery(&m, "deploy")
+	m.SetError("line1\nline2")
+
+	box := m.renderBox(80)
+	w, h := m.BoxSize(80, 24)
+	if gw, gh := lipgloss.Width(box), lipgloss.Height(box); gw != w || gh != h {
+		t.Errorf("rendered %dx%d, BoxSize %dx%d", gw, gh, w, h)
+	}
+	if plain := ansi.Strip(box); !strings.Contains(plain, "line1 line2") {
+		t.Error("error text must be flattened to one line")
+	}
+}
+
+func TestSetResultsIgnoredWhenNotLoading(t *testing.T) {
+	m := New()
+	m.Open()
+	// No search in flight: a stale async result must not inject state.
+	m.SetResults(items(), 2)
+	if m.st != stateInput {
+		t.Fatalf("stale SetResults moved state to %v", m.st)
+	}
+	m.SetError("stale")
+	if m.st != stateInput || m.errMsg != "" {
+		t.Fatal("stale SetError must be ignored outside stateLoading")
+	}
+
+	// After results land, a second late SetResults is also ignored.
+	submitQuery(&m, "deploy")
+	m.SetResults(items(), 2)
+	m.SetResults(manyItems(5), 5)
+	if len(m.items) != 2 {
+		t.Fatalf("late SetResults overwrote items: len=%d, want 2", len(m.items))
+	}
+}
+
+func TestScrollWindowEdges(t *testing.T) {
+	m := New()
+	m.Open()
+	submitQuery(&m, "deploy")
+	m.SetResults(manyItems(15), 15)
+
+	// Walk to the bottom: window pins to the last 10 items.
+	for i := 0; i < 20; i++ {
+		m.HandleKey("down")
+	}
+	if m.selected != 14 {
+		t.Fatalf("selected = %d, want 14", m.selected)
+	}
+	if start, end := m.visibleWindow(); start != 5 || end != 15 {
+		t.Fatalf("bottom window = [%d,%d), want [5,15)", start, end)
+	}
+
+	// Walk back to the top.
+	for i := 0; i < 20; i++ {
+		m.HandleKey("up")
+	}
+	if m.selected != 0 {
+		t.Fatalf("selected = %d, want 0", m.selected)
+	}
+	if start, end := m.visibleWindow(); start != 0 || end != 10 {
+		t.Fatalf("top window = [%d,%d), want [0,10)", start, end)
+	}
+}
+
+func TestMultiByteBackspace(t *testing.T) {
+	m := New()
+	m.Open()
+	m.HandleKey("a")
+	m.HandleKey("é")
+	m.HandleKey("🙂")
+	m.HandleKey("backspace")
+	if m.Query() != "aé" {
+		t.Fatalf("query = %q, want %q", m.Query(), "aé")
+	}
+	m.HandleKey("backspace")
+	if m.Query() != "a" {
+		t.Fatalf("query = %q, want %q", m.Query(), "a")
 	}
 }

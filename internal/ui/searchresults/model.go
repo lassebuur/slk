@@ -7,6 +7,7 @@ package searchresults
 import (
 	"fmt"
 	"strings"
+	"unicode"
 
 	"charm.land/lipgloss/v2"
 	"github.com/gammons/slk/internal/ui/messages"
@@ -86,6 +87,9 @@ func (m Model) Loading() bool { return m.st == stateLoading }
 
 // SetResults installs server results for the in-flight query.
 func (m *Model) SetResults(items []Item, total int) {
+	if m.st != stateLoading {
+		return // defense against stale async injection; the caller also guards by query
+	}
 	m.items = items
 	m.total = total
 	m.selected = 0
@@ -94,7 +98,11 @@ func (m *Model) SetResults(items []Item, total int) {
 
 // SetError shows an error line; the query is preserved for retry.
 func (m *Model) SetError(msg string) {
-	m.errMsg = msg
+	if m.st != stateLoading {
+		return // defense against stale async injection; the caller also guards by query
+	}
+	// Flatten so a multi-line error can't desync BoxSize from the render.
+	m.errMsg = flattenText(msg)
 	m.st = stateError
 }
 
@@ -115,6 +123,11 @@ func (m *Model) HandleKey(keyStr string) Action {
 		m.Close()
 		return ActionClose
 	case "enter":
+		if m.st == stateLoading {
+			// A search is already in flight; re-submitting would fire
+			// duplicate rate-limited search.messages calls.
+			return ActionNone
+		}
 		if m.st == stateResults {
 			if _, ok := m.Selected(); ok {
 				return ActionSelect
@@ -126,11 +139,11 @@ func (m *Model) HandleKey(keyStr string) Action {
 		}
 		m.st = stateLoading
 		return ActionSubmit
-	case "up", "ctrl+k":
+	case "up", "ctrl+k", "ctrl+p":
 		if m.st == stateResults && m.selected > 0 {
 			m.selected--
 		}
-	case "down", "ctrl+j":
+	case "down", "ctrl+j", "ctrl+n":
 		if m.st == stateResults && m.selected < len(m.items)-1 {
 			m.selected++
 		}
@@ -154,8 +167,54 @@ func (m *Model) HandleKey(keyStr string) Action {
 	return ActionNone
 }
 
+// listTopOffset is the box-local row of the first body row: top border
+// (1) + top padding (1) + title (1) + input (1) + blank separator (1).
+// Shared by renderBox (implicitly) and ClickRow's hit-testing.
+const listTopOffset = 5
+
 // maxVisibleRows is the height of the scroll window for the results list.
 const maxVisibleRows = 10
+
+// ClickRow maps a box-local row (localY, 0 = box top border) to a result
+// row. When the click lands on a visible list row it moves the selection
+// there and returns true; otherwise it returns false. termWidth/termHeight
+// are accepted for interface symmetry and currently unused.
+func (m *Model) ClickRow(termWidth, termHeight, localY int) bool {
+	if m.st != stateResults {
+		// Body rows in the input/loading/error states aren't results.
+		return false
+	}
+	row := localY - listTopOffset
+	if row < 0 {
+		return false
+	}
+	start, end := m.visibleWindow()
+	if row >= end-start {
+		return false
+	}
+	m.selected = start + row
+	return true
+}
+
+// flattenText collapses a multi-line string into a single screen line:
+// \n and \t become spaces, and all other control runes (\r, BEL, ...)
+// are dropped. Control characters break ANSI-aware width math and the
+// box alignment that depends on it.
+func flattenText(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		switch {
+		case r == '\n' || r == '\t':
+			b.WriteRune(' ')
+		case unicode.IsControl(r):
+			// drop
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
 
 // boxWidth returns the modal's outer width for a given terminal width.
 // Single source of truth for renderBox and BoxSize.
@@ -253,7 +312,17 @@ func (m Model) renderBox(termWidth int) string {
 		placeholder := lipgloss.NewStyle().Background(bg).Foreground(styles.TextMuted).Render("Type a query, Enter to search...")
 		inputText = "█ " + placeholder
 	} else {
+		// Truncate head-side (keep the tail and the cursor visible) so a
+		// long query can't wrap the input line and desync BoxSize. The
+		// input style spends 2 cols (left border + padding) of innerWidth.
 		inputText = m.query + "█"
+		if avail := innerWidth - 2; lipgloss.Width(inputText) > avail {
+			r := []rune(inputText)
+			for len(r) > 0 && lipgloss.Width("…"+string(r)) > avail {
+				r = r[1:]
+			}
+			inputText = "…" + string(r)
+		}
 	}
 	input := lipgloss.NewStyle().
 		BorderStyle(lipgloss.Border{Left: "▌"}).
@@ -313,12 +382,44 @@ func (m Model) bodyLines(innerWidth int) []string {
 // resultRows renders the visible window of result rows ("#channel
 // author  timestamp  snippet", selected row highlighted) plus the
 // "showing K of N" footer when the server reported more matches than
-// were fetched.
+// were fetched. When the fetched list overflows the visible window a
+// proportional scrollbar gutter is drawn on the right (same pattern as
+// channelfinder/workspacefinder/themeswitcher).
 func (m Model) resultRows(innerWidth int) []string {
 	bg := styles.Background
-	contentWidth := innerWidth - 1 // 1 col indicator/space prefix
 
+	total := len(m.items)
 	startIdx, endIdx := m.visibleWindow()
+	maxVisible := endIdx - startIdx
+
+	showScrollbar := total > maxVisible
+	contentWidth := innerWidth - 1 // 1 col indicator/space prefix
+	if showScrollbar {
+		contentWidth-- // 1 col for the scrollbar gutter
+	}
+
+	var thumbStart, thumbEnd int
+	if showScrollbar {
+		thumbHeight := maxVisible * maxVisible / total
+		if thumbHeight < 1 {
+			thumbHeight = 1
+		}
+		denom := total - maxVisible
+		if denom < 1 {
+			denom = 1
+		}
+		thumbStart = startIdx * (maxVisible - thumbHeight) / denom
+		if thumbStart < 0 {
+			thumbStart = 0
+		}
+		if thumbStart > maxVisible-thumbHeight {
+			thumbStart = maxVisible - thumbHeight
+		}
+		thumbEnd = thumbStart + thumbHeight
+	}
+	thumbStyle := lipgloss.NewStyle().Background(bg).Foreground(styles.Primary)
+	trackStyle := lipgloss.NewStyle().Background(bg).Foreground(styles.Border)
+
 	var rows []string
 	for i := startIdx; i < endIdx; i++ {
 		item := m.items[i]
@@ -335,7 +436,7 @@ func (m Model) resultRows(innerWidth int) []string {
 			textStyle = textStyle.Foreground(styles.Primary).Bold(true)
 		}
 
-		snippet := strings.ReplaceAll(item.Text, "\n", " ")
+		snippet := flattenText(item.Text)
 		line := chanStyle.Render("#"+item.ChannelName) + "  " +
 			nameStyle.Render(item.UserName) + "  " +
 			chanStyle.Render(item.Timestamp) + "  " +
@@ -350,12 +451,23 @@ func (m Model) resultRows(innerWidth int) []string {
 			line += strings.Repeat(" ", pad)
 		}
 
+		var row string
 		if isSelected {
 			indicator := lipgloss.NewStyle().Background(bg).Foreground(styles.Accent).Render("▌")
-			rows = append(rows, indicator+line)
+			row = indicator + line
 		} else {
-			rows = append(rows, " "+line)
+			row = " " + line
 		}
+
+		if showScrollbar {
+			rel := i - startIdx
+			if rel >= thumbStart && rel < thumbEnd {
+				row += thumbStyle.Render("█")
+			} else {
+				row += trackStyle.Render("│")
+			}
+		}
+		rows = append(rows, row)
 	}
 
 	if m.total > len(m.items) {
