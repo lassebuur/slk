@@ -228,6 +228,56 @@ func TestSearchChannelMessages_EmptyQuery(t *testing.T) {
 	}
 }
 
+// Thread replies live in the messages table (upserted when threads are
+// viewed) but the channel pane can't display them, so channel search
+// must exclude them — mirroring GetMessages' feed predicate. Parents
+// (thread_ts = ts) and thread_broadcast rows ARE in the feed and must
+// match.
+func TestSearchChannelMessages_ExcludesThreadReplies(t *testing.T) {
+	seedThreadMessages := func(t *testing.T, db *DB) {
+		t.Helper()
+		db.UpsertChannel(Channel{ID: "C1", WorkspaceID: "T1", Name: "general", Type: "channel", IsMember: true})
+		for _, m := range []Message{
+			{TS: "1700000001.000000", ChannelID: "C1", WorkspaceID: "T1", Text: "deploy parent", ThreadTS: "1700000001.000000"},
+			{TS: "1700000002.000000", ChannelID: "C1", WorkspaceID: "T1", Text: "deploy reply", ThreadTS: "1700000001.000000"},
+			{TS: "1700000003.000000", ChannelID: "C1", WorkspaceID: "T1", Text: "deploy broadcast", ThreadTS: "1700000001.000000", Subtype: "thread_broadcast"},
+		} {
+			if err := db.UpsertMessage(m); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	want := []string{"1700000003.000000", "1700000001.000000"} // newest first; reply excluded
+
+	for _, mode := range []struct {
+		name        string
+		ftsDisabled bool
+	}{
+		{"fts", false},
+		{"like", true},
+	} {
+		t.Run(mode.name, func(t *testing.T) {
+			db := setupDBWithWorkspace(t)
+			defer db.Close()
+			seedThreadMessages(t, db)
+			db.ftsDisabled = mode.ftsDisabled
+
+			got, err := db.SearchChannelMessages("C1", "T1", "deploy")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(got) != len(want) {
+				t.Fatalf("got %v, want %v", got, want)
+			}
+			for i := range want {
+				if got[i] != want[i] {
+					t.Fatalf("got %v, want %v", got, want)
+				}
+			}
+		})
+	}
+}
+
 func TestSearchChannelMessages_LikeFallback(t *testing.T) {
 	db := setupDBWithWorkspace(t)
 	defer db.Close()

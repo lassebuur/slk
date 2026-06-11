@@ -1054,7 +1054,7 @@ func run() error {
 				if wctx == nil {
 					return nil
 				}
-				msgItems := fetchOlderMessages(wctx.Client, chIDStr, string(oldestTS), db, wctx.UserNames, tsFormat, avatarCache, router)
+				msgItems := fetchOlderMessages(wctx.Client, chIDStr, string(oldestTS), db, wctx.UserNames, tsFormat, router)
 				return ui.OlderMessagesLoadedMsg{
 					ChannelID: chIDStr,
 					AnchorTS:  string(oldestTS),
@@ -1091,7 +1091,9 @@ func run() error {
 			SearchChannel: func(channelID ids.ChannelID, query string) tea.Msg {
 				wctx := router.Active()
 				if wctx == nil {
-					return nil
+					// Returning nil would leave the `/query  …` spinner
+					// stuck; surface the failure like searchWorkspaceFunc.
+					return ui.ChannelSearchResultsMsg{ChannelID: string(channelID), Query: query, Err: errors.New("no active workspace")}
 				}
 				terms := strings.Fields(query)
 				folded := make([]string, 0, len(terms))
@@ -2187,7 +2189,7 @@ func resolveUser(client *slackclient.Client, userID string, userNames map[string
 	return userID, false
 }
 
-func fetchOlderMessages(client *slackclient.Client, channelID, latestTS string, db *cache.DB, userNames map[string]string, tsFormat string, avatarCache *avatar.Cache, router *workspaceRouter) []messages.MessageItem {
+func fetchOlderMessages(client *slackclient.Client, channelID, latestTS string, db *cache.DB, userNames map[string]string, tsFormat string, router *workspaceRouter) []messages.MessageItem {
 	ctx := context.Background()
 	debuglog.Cache("fetchOlderMessages: channel=%s latest_ts=%s entry", channelID, latestTS)
 	start := time.Now()

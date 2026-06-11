@@ -60,7 +60,9 @@ func handleNormalMode(a *App, msg tea.KeyMsg) tea.Cmd {
 		// limitation: Esc during the in-flight window doesn't cancel
 		// a local channel search; acceptable because local FTS is
 		// ms-fast — workspace search cancels via modal close instead.
-		if a.search != nil {
+		// The statusbar check covers the no-active-state case where
+		// only the "/foo  no matches" segment lingers.
+		if a.search != nil || a.statusbar.Search() != "" {
 			a.clearActiveSearch()
 			return nil
 		}

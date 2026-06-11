@@ -151,10 +151,22 @@ var reduceChannels reducerFunc = func(a *App, msg tea.Msg) (tea.Cmd, bool) {
 		if m.Err != nil || len(m.Messages) == 0 {
 			return func() tea.Msg { return ToastMsg{Text: "Failed to load history around message"} }, true
 		}
-		a.messagepane.SetMessages(m.Messages)
-		if !a.messagepane.SelectByTS(m.TargetTS) {
+		// Confirm the target is actually in the fetched window BEFORE
+		// replacing the buffer: a failed jump must keep the user's
+		// current position (spec error table), not strand them in an
+		// unrelated window.
+		found := false
+		for _, msg := range m.Messages {
+			if msg.TS == m.TargetTS {
+				found = true
+				break
+			}
+		}
+		if !found {
 			return func() tea.Msg { return ToastMsg{Text: "Message not found in loaded history"} }, true
 		}
+		a.messagepane.SetMessages(m.Messages)
+		a.messagepane.SelectByTS(m.TargetTS)
 		return nil, true
 
 	case ChannelMarkedRemoteMsg:

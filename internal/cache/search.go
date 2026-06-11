@@ -89,12 +89,17 @@ func (db *DB) SearchChannelMessages(channelID, workspaceID, query string) ([]str
 	if match == "" {
 		return nil, nil
 	}
+	// Mirror GetMessages' channel-feed predicate: plain thread replies
+	// (cached when threads are viewed) can't be displayed in the
+	// channel pane, so jumping to one would fail. Searching replies is
+	// a v2 follow-up.
 	rows, err := db.conn.Query(`
 		SELECT m.ts
 		FROM messages_fts f
 		JOIN messages m ON m.rowid = f.rowid
 		WHERE messages_fts MATCH ?
 		  AND m.channel_id = ? AND m.workspace_id = ? AND m.is_deleted = 0
+		  AND (m.thread_ts = '' OR m.thread_ts = m.ts OR m.subtype = 'thread_broadcast')
 		ORDER BY m.ts DESC`, match, channelID, workspaceID)
 	if err != nil {
 		return nil, fmt.Errorf("searching messages: %w", err)
@@ -109,7 +114,11 @@ func (db *DB) searchChannelMessagesLike(channelID, workspaceID, query string) ([
 	if len(terms) == 0 {
 		return nil, nil
 	}
-	q := `SELECT ts FROM messages WHERE channel_id = ? AND workspace_id = ? AND is_deleted = 0`
+	// Same channel-feed predicate as the FTS path: thread replies
+	// can't be displayed in the channel pane (reply search is a v2
+	// follow-up).
+	q := `SELECT ts FROM messages WHERE channel_id = ? AND workspace_id = ? AND is_deleted = 0
+		AND (thread_ts = '' OR thread_ts = ts OR subtype = 'thread_broadcast')`
 	args := []any{channelID, workspaceID}
 	for _, term := range terms {
 		q += ` AND text LIKE ? ESCAPE '\'`

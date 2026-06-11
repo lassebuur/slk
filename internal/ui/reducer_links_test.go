@@ -253,6 +253,33 @@ func TestMessagesAroundLoaded_ReplacesBufferAndSelects(t *testing.T) {
 	}
 }
 
+// A failed jump must be non-destructive: if the fetched window doesn't
+// contain the target, the current buffer (and position) stays intact —
+// per the spec's error table — and the user just gets a toast.
+func TestMessagesAroundLoaded_TargetMissingKeepsBuffer(t *testing.T) {
+	app := NewApp()
+	app.activeChannelID = "C1"
+	app.messagepane.SetMessages([]messages.MessageItem{{TS: "1.0", Text: "keep"}})
+	_, cmd := app.Update(MessagesAroundLoadedMsg{
+		ChannelID: "C1",
+		TargetTS:  "9.0",
+		Messages:  []messages.MessageItem{{TS: "2.0", Text: "window"}},
+	})
+	sel, ok := app.messagepane.SelectedMessage()
+	if !ok || sel.Text != "keep" {
+		t.Fatalf("buffer replaced on failed jump: sel=%+v ok=%v", sel, ok)
+	}
+	var toast string
+	for _, m := range drainCmd(cmd) {
+		if tm, ok := m.(ToastMsg); ok {
+			toast = tm.Text
+		}
+	}
+	if toast != "Message not found in loaded history" {
+		t.Fatalf("toast = %q", toast)
+	}
+}
+
 func TestMessagesAroundLoaded_ErrorToasts(t *testing.T) {
 	app := NewApp()
 	app.activeChannelID = "C1"

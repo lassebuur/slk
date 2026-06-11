@@ -121,8 +121,10 @@ New modal widget package following the channelfinder pattern:
   A "Searching…" spinner shows while in flight; a new `Enter` with a new
   query replaces results.
 - Results list: one row per match — `#channel`, author display name,
-  relative timestamp, text snippet. `j`/`k`/arrows navigate, `Enter` jumps,
-  `Esc` closes.
+  absolute timestamp in the configured `tsFormat` (consistent with the
+  message pane; no relative-time machinery exists in slk), text snippet.
+  Arrows/`ctrl+j`/`ctrl+k`/`ctrl+p`/`ctrl+n` navigate (`j`/`k` must type
+  into the query input), `Enter` jumps, `Esc` closes.
 - Rows render from data in the search response itself (Slack includes
   channel name and username per match), so uncached channels/users display
   fine; jumping to an uncached channel goes through the normal channel-open

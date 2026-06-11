@@ -5,9 +5,10 @@
 // status-line `/query  i/N` segment.
 //
 // Message family:
-//   ChannelSearchResultsMsg   - FTS match list for the active channel
-//   WorkspaceSearchResultsMsg - server-side search.messages results
-//                               for the ctrl+f modal
+//
+//	ChannelSearchResultsMsg   - FTS match list for the active channel
+//	WorkspaceSearchResultsMsg - server-side search.messages results
+//	                            for the ctrl+f modal
 //
 // Stale results (the user switched channels while the query ran) are
 // dropped. An error clears search state and toasts; an empty result

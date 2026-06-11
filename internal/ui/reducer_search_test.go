@@ -167,6 +167,21 @@ func TestSearchModeEscCancels(t *testing.T) {
 	}
 }
 
+// After a no-match search there is no active search state (a.search ==
+// nil) but the `/foo  no matches` segment lingers in the status bar;
+// Esc must clear it instead of falling through to thread/edit handling.
+func TestEscClearsNoMatchesStatus(t *testing.T) {
+	app := searchTestApp(t)
+	app.Update(ChannelSearchResultsMsg{ChannelID: "C1", Query: "zzz"})
+	if app.statusbar.Search() == "" {
+		t.Fatal("precondition: no-matches status segment set")
+	}
+	app.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+	if got := app.statusbar.Search(); got != "" {
+		t.Fatalf("statusbar search segment = %q after Esc, want empty", got)
+	}
+}
+
 func TestChannelSwitchClearsNoMatchesStatus(t *testing.T) {
 	app := searchTestApp(t)
 	app.Update(ChannelSearchResultsMsg{ChannelID: "C1", Query: "zzz"})
