@@ -170,12 +170,19 @@ func (b *workspaceBootstrap) Handle(a *App, msg tea.Msg) (tea.Cmd, bool) {
 	switch m := msg.(type) {
 	case SpinnerTickMsg:
 		_ = m
-		if !(b.IsLoading() || a.messagepane.IsLoading()) {
-			// Neither loader is active anymore; let the chain die.
+		if !(b.IsLoading() || a.anyWinModelLoading()) {
+			// No loader is active anymore (overlay or any window's
+			// model); let the chain die. The gate must consider
+			// EVERY window: a backfill marks the then-focused model
+			// loading, and if focus moves before completion a
+			// focused-only gate would kill the chain and freeze the
+			// other window's glyph.
 			return nil, true
 		}
 		a.spinnerFrame = (a.spinnerFrame + 1) % len(styles.SpinnerChars)
-		a.messagepane.SetSpinnerFrame(a.spinnerFrame)
+		for _, mp := range a.allWinModels() {
+			mp.SetSpinnerFrame(a.spinnerFrame)
+		}
 		return spinnerTickCmd(), true
 
 	case LoadingTimeoutMsg:

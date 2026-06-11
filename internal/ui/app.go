@@ -1509,12 +1509,16 @@ func (a *App) exitInsertAfterSend() {
 	a.threadCompose.Blur()
 }
 
-// clearSelections drops any active mouse selection from both message
-// and thread panes. Called from any handler that changes focus, mode,
+// clearSelections drops any active mouse selection from every
+// window's message pane and from the thread pane (an unfocused
+// window can hold a selection pinned from when it was focused).
+// Called from any handler that changes focus, mode,
 // or visible content in a way that makes the existing selection
 // nonsensical (workspace switch, mode change, focus cycle, etc.).
 func (a *App) clearSelections() {
-	a.messagepane.ClearSelection()
+	for _, m := range a.allWinModels() {
+		m.ClearSelection()
+	}
 	a.threadPanel.ClearSelection()
 }
 
@@ -1778,7 +1782,9 @@ func (a *App) SetChannels(items []sidebar.ChannelItem) {
 	a.compose.SetChannels(picks)
 	a.threadCompose.SetChannels(picks)
 	a.channelNames = names
-	a.messagepane.SetChannelNames(names)
+	for _, m := range a.allWinModels() {
+		m.SetChannelNames(names)
+	}
 	a.threadPanel.SetChannelNames(names)
 	a.threadsView.SetChannelNames(names)
 }
@@ -1858,7 +1864,9 @@ func (a *App) SetChannelFinderItems(items []channelfinder.Item) {
 // SetAvatarFunc sets the function used to get rendered avatars for messages.
 func (a *App) SetAvatarFunc(fn messages.AvatarFunc) {
 	a.avatarFn = fn
-	a.messagepane.SetAvatarFunc(fn)
+	for _, m := range a.allWinModels() {
+		m.SetAvatarFunc(fn)
+	}
 	a.threadPanel.SetAvatarFunc(fn)
 }
 
@@ -1867,7 +1875,9 @@ func (a *App) SetAvatarFunc(fn messages.AvatarFunc) {
 // View(). Pass a zero-valued ImageContext to disable inline rendering.
 func (a *App) SetImageContext(ctx imgrender.ImageContext) {
 	a.imageCtx = ctx
-	a.messagepane.SetImageContext(ctx)
+	for _, m := range a.allWinModels() {
+		m.SetImageContext(ctx)
+	}
 	a.threadPanel.SetImageContext(ctx)
 }
 
@@ -1880,7 +1890,9 @@ func (a *App) SetImageContext(ctx imgrender.ImageContext) {
 // Phase 8 extends this to the picker; Phase 9 to autocomplete.
 func (a *App) SetEmojiContext(ctx messages.EmojiContext) {
 	a.emojiCtx = ctx
-	a.messagepane.SetEmojiContext(ctx)
+	for _, m := range a.allWinModels() {
+		m.SetEmojiContext(ctx)
+	}
 	a.threadPanel.SetEmojiContext(thread.EmojiContext{
 		PlaceCtx: ctx.PlaceCtx,
 		Cells:    ctx.Cells,
@@ -2149,7 +2161,9 @@ func openURLCmd(url string) tea.Cmd {
 func (a *App) SetUserNames(names map[string]string) {
 	a.userNames = names
 	a.threadsView.SetUserNames(names)
-	a.messagepane.SetUserNames(names)
+	for _, m := range a.allWinModels() {
+		m.SetUserNames(names)
+	}
 	a.threadPanel.SetUserNames(names)
 
 	// Build user list for mention picker
@@ -2236,7 +2250,9 @@ func (a *App) SetCustomEmoji(customs map[string]string) {
 	// Update all panes' emoji-image context so newly-known custom
 	// emoji URLs become resolvable on the next render.
 	a.emojiCustoms = customs
-	a.messagepane.SetEmojiCustoms(customs)
+	for _, m := range a.allWinModels() {
+		m.SetEmojiCustoms(customs)
+	}
 	a.threadPanel.SetEmojiCustoms(customs)
 	a.reactionPicker.SetEmojiCustoms(customs)
 	// Compose autocomplete dropdowns (main + thread) also need the

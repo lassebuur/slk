@@ -116,6 +116,29 @@ func (a *App) allWinModels() []*messages.Model {
 	return out
 }
 
+// invalidateAllWinModelCaches drops every window model's render cache
+// (theme change: cached rows bake in the old palette).
+func (a *App) invalidateAllWinModelCaches() {
+	for _, m := range a.allWinModels() {
+		m.InvalidateCache()
+	}
+}
+
+// anyWinModelLoading reports whether ANY window's model is showing
+// its loading spinner. The spinner-tick gate must consider every
+// window, not just the focused one: a backfill sets loading on the
+// then-focused model, and if focus moves before completion a
+// focused-only gate kills the tick chain, freezing the other
+// window's glyph.
+func (a *App) anyWinModelLoading() bool {
+	for _, m := range a.allWinModels() {
+		if m.IsLoading() {
+			return true
+		}
+	}
+	return false
+}
+
 // syncWinModels evicts models for windows no longer in the tree
 // (after close/only). Additions happen explicitly in splitWindow.
 func (a *App) syncWinModels() {
