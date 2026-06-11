@@ -100,3 +100,29 @@ func TestCommandMode_EnterOnEmptyJustExits(t *testing.T) {
 		t.Fatal("empty Enter should produce no cmd")
 	}
 }
+
+func TestCommandMode_ExternalModeChangeClearsPrompt(t *testing.T) {
+	a := NewApp()
+	a.enterCommandMode()
+	typeCommand(a, "ws")
+	// Simulate command mode being yanked away by a global intercept
+	// (e.g. ctrl+c quit-confirm) or an async reducer.
+	a.SetMode(ModeConfirm)
+	if a.cmdline != "" {
+		t.Fatalf("cmdline = %q, want empty after external mode change", a.cmdline)
+	}
+	if out := a.statusbar.View(120); strings.Contains(out, ":ws") {
+		t.Fatalf("stale prompt still rendered after external mode change:\n%s", out)
+	}
+}
+
+func TestCommandMode_SpaceAppends(t *testing.T) {
+	a := NewApp()
+	a.enterCommandMode()
+	typeCommand(a, "sp")
+	_ = handleCommandMode(a, tea.KeyPressMsg{Code: tea.KeySpace, Text: " "})
+	typeCommand(a, "x")
+	if a.cmdline != "sp x" {
+		t.Fatalf("cmdline = %q, want %q", a.cmdline, "sp x")
+	}
+}

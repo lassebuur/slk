@@ -1411,6 +1411,16 @@ func (a *App) SetMode(mode Mode) {
 	if mode == ModeInsert {
 		a.clearSelections()
 	}
+	// Leaving command mode by ANY path — including global intercepts
+	// (ctrl+c quit-confirm) and async reducers that force a mode —
+	// must drop the ':' prompt, or the statusbar keeps rendering a
+	// stale command line forever. Keeps the cmdline field's "always
+	// empty outside ModeCommand" invariant true; idempotent with
+	// exitCommandMode, which clears before calling here.
+	if a.mode == ModeCommand && mode != ModeCommand {
+		a.cmdline = ""
+		a.statusbar.SetCommandLine("")
+	}
 	a.mode = mode
 	a.statusbar.SetMode(mode)
 }
