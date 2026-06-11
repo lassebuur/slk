@@ -7,9 +7,11 @@
 package ui
 
 import (
+	"strings"
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/gammons/slk/internal/ui/wintree"
 )
@@ -99,6 +101,60 @@ func TestChord_UnmappedKeyCancelsSilently(t *testing.T) {
 	}
 	if a.wins.Len() != 1 {
 		t.Fatalf("Len = %d, want 1", a.wins.Len())
+	}
+}
+
+func TestChord_EscMidChordDoesNotLeakToEscapeCase(t *testing.T) {
+	// Pins the intercept ORDER: the pending sub-state must swallow
+	// Esc before the main switch, whose Escape case would close a
+	// visible thread panel.
+	a := newWideTestApp(t)
+	a.threadVisible = true
+	pressCtrlW(a)
+	_ = handleNormalMode(a, tea.KeyPressMsg{Code: tea.KeyEscape})
+	if !a.threadVisible {
+		t.Fatal("esc mid-chord must be swallowed, not close the thread panel")
+	}
+	if a.pendingWinCmd {
+		t.Fatal("esc should still cancel the pending state")
+	}
+}
+
+// statusHint renders the statusbar wide enough that the help hint is
+// never dropped for lack of gap space, and strips ANSI for Contains.
+func statusHint(a *App) string {
+	return ansi.Strip(a.statusbar.View(200))
+}
+
+func TestChord_HintLifecycle(t *testing.T) {
+	a := newWideTestApp(t)
+	if !strings.Contains(statusHint(a), "? for keybindings") {
+		t.Fatalf("precondition: default hint missing, got %q", statusHint(a))
+	}
+
+	// Armed: prefix hint shown.
+	pressCtrlW(a)
+	if !strings.Contains(statusHint(a), "ctrl+w …") {
+		t.Fatalf("armed: want %q hint, got %q", "ctrl+w …", statusHint(a))
+	}
+
+	// (a) Completed chord restores the default hint (not blanked).
+	_ = press(a, 'v')
+	if strings.Contains(statusHint(a), "ctrl+w …") {
+		t.Fatalf("after chord: prefix hint must clear, got %q", statusHint(a))
+	}
+	if !strings.Contains(statusHint(a), "? for keybindings") {
+		t.Fatalf("after chord: default hint must be restored, got %q", statusHint(a))
+	}
+
+	// (b) SetMode disarm restores the default hint too.
+	pressCtrlW(a)
+	a.SetMode(ModeConfirm)
+	if strings.Contains(statusHint(a), "ctrl+w …") {
+		t.Fatalf("after SetMode disarm: prefix hint must clear, got %q", statusHint(a))
+	}
+	if !strings.Contains(statusHint(a), "? for keybindings") {
+		t.Fatalf("after SetMode disarm: default hint must be restored, got %q", statusHint(a))
 	}
 }
 
