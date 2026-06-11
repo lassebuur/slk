@@ -31,8 +31,11 @@ func TestHelp_StillListsWorkspaceFinderViaWS(t *testing.T) {
 	entries := help.FromKeyMap(DefaultKeyMap())
 	found := false
 	for _, e := range entries {
-		if e.Key == "ctrl+w" {
-			t.Fatalf("help entry %+v still advertises ctrl+w (reserved as window prefix)", e)
+		// Phase 2: ctrl+w is the window-command prefix; the only help
+		// entry allowed to carry it is that one. It must never again
+		// advertise the workspace finder.
+		if e.Key == "ctrl+w" && e.Desc != "window commands" {
+			t.Fatalf("help entry %+v advertises ctrl+w for something other than window commands", e)
 		}
 		if e.Key == ":ws" && e.Desc == "switch workspace" {
 			found = true

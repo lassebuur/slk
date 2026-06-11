@@ -123,6 +123,11 @@ type App struct {
 	wins       *wintree.Tree
 	focusedWin wintree.LeafID
 
+	// pendingWinCmd is true between a ctrl+w press and its chord key
+	// (vim window-command prefix). Esc or an unmapped key cancels;
+	// any mode change disarms (see SetMode).
+	pendingWinCmd bool
+
 	// layout owns the per-frame layout geometry (horizontal bands for
 	// mouse hit-testing + per-pane content heights for pageSize). See
 	// internal/ui/panellayout.go.
@@ -463,10 +468,18 @@ func NewApp() *App {
 	}})
 	// Seed the statusbar hint with the configured help key label so it
 	// stays accurate if the binding is ever changed.
-	if helpKey := app.keys.Help.Help().Key; helpKey != "" {
-		app.statusbar.SetHelpHint(helpKey + " for keybindings")
-	}
+	app.statusbar.SetHelpHint(app.defaultHelpHint())
 	return app
+}
+
+// defaultHelpHint is the resting statusbar hint ("? for keybindings").
+// Seeded at construction and restored when a transient hint (e.g. the
+// ctrl+w chord prefix) ends — clearing to "" would erase it for good.
+func (a *App) defaultHelpHint() string {
+	if helpKey := a.keys.Help.Help().Key; helpKey != "" {
+		return helpKey + " for keybindings"
+	}
+	return ""
 }
 
 func (a *App) Init() tea.Cmd {
@@ -1421,6 +1434,14 @@ func (a *App) openThreadPanel(parent messages.MessageItem, channelID, threadTS s
 }
 
 func (a *App) SetMode(mode Mode) {
+	// A mode change always disarms a pending ctrl+w chord — a global
+	// intercept (e.g. ctrl+c quit-confirm) must not strand it armed.
+	// The `if` guard scopes the hint restore to chord disarms only, so
+	// other helpHint states aren't clobbered by unrelated mode changes.
+	if a.pendingWinCmd {
+		a.pendingWinCmd = false
+		a.statusbar.SetHelpHint(a.defaultHelpHint())
+	}
 	if mode == ModeInsert {
 		a.clearSelections()
 	}

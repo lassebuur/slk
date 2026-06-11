@@ -49,6 +49,13 @@ type KeyMap struct {
 	Help                key.Binding
 	SaveThread          key.Binding
 	ListReactions       key.Binding
+	WindowPrefix        key.Binding
+	WinSplit            key.Binding
+	WinVSplit           key.Binding
+	WinNavigate         key.Binding
+	WinCycle            key.Binding
+	WinClose            key.Binding
+	WinOnly             key.Binding
 }
 
 func DefaultKeyMap() KeyMap {
@@ -102,5 +109,16 @@ func DefaultKeyMap() KeyMap {
 		Help:                key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "show keybindings")),
 		SaveThread:          key.NewBinding(key.WithKeys("S"), key.WithHelp("S", "save thread")),
 		ListReactions:       key.NewBinding(key.WithKeys("L"), key.WithHelp("L", "list reactions")),
+		// Window commands (design §4). WindowPrefix is the only real
+		// binding; the Win* entries are keyless help-only bindings
+		// (same trick as WorkspaceFinder above) — actual dispatch of
+		// the chord key happens in handleWindowChord.
+		WindowPrefix: key.NewBinding(key.WithKeys("ctrl+w"), key.WithHelp("ctrl+w", "window commands")),
+		WinSplit:     key.NewBinding(key.WithHelp("ctrl+w s / :sp", "split window")),
+		WinVSplit:    key.NewBinding(key.WithHelp("ctrl+w v / :vsp", "vertical split window")),
+		WinNavigate:  key.NewBinding(key.WithHelp("ctrl+w h/j/k/l", "focus window in direction")),
+		WinCycle:     key.NewBinding(key.WithHelp("ctrl+w w", "cycle windows")),
+		WinClose:     key.NewBinding(key.WithHelp("ctrl+w q / :q", "close window")),
+		WinOnly:      key.NewBinding(key.WithHelp("ctrl+w o / :only", "close other windows")),
 	}
 }

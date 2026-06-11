@@ -16,6 +16,34 @@ import (
 	"github.com/gammons/slk/internal/ui/wintree"
 )
 
+// handleWindowChord consumes the key following ctrl+w (vim window
+// commands, design §4). Unmapped keys — including Esc — cancel
+// silently, matching vim.
+func (a *App) handleWindowChord(msg tea.KeyMsg) tea.Cmd {
+	switch msg.String() {
+	case "s":
+		return a.splitWindow(wintree.SplitStacked)
+	case "v":
+		return a.splitWindow(wintree.SplitSideBySide)
+	case "h", "left":
+		return a.navigateWindow(wintree.NavLeft)
+	case "j", "down":
+		return a.navigateWindow(wintree.NavDown)
+	case "k", "up":
+		return a.navigateWindow(wintree.NavUp)
+	case "l", "right":
+		return a.navigateWindow(wintree.NavRight)
+	case "w", "ctrl+w":
+		return a.cycleWindow()
+	case "q", "c":
+		return a.closeWindow()
+	case "o":
+		a.onlyWindow()
+		return nil
+	}
+	return nil
+}
+
 // windowBounds returns the messages-region rectangle the window tree
 // subdivides. Recomputing the layout frame here is safe: Compute is
 // deterministic for unchanged inputs and View re-runs it each frame.

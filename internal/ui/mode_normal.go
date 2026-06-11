@@ -14,6 +14,9 @@
 //     M (mark unread), O (open image preview)
 //   - reaction nav sub-state: r enters; arrows + Enter select
 //     (delegated to handleReactionNav / handleThreadReactionNav)
+//   - window commands: Ctrl-W prefix arms a pending sub-state; the
+//     next key is a window chord (s/v split, h/j/k/l focus, w cycle,
+//     q/c close, o only — delegated to handleWindowChord)
 //   - workspace switch: 1-9 number keys (handled in default arm)
 //   - quit confirm: q (close thread if visible, else no-op),
 //     Q (quit confirm)
@@ -32,6 +35,14 @@ import (
 )
 
 func handleNormalMode(a *App, msg tea.KeyMsg) tea.Cmd {
+	// ctrl+w pending sub-state: the next key is a window command
+	// (intercepted FIRST, like the reaction-nav sub-states below).
+	if a.pendingWinCmd {
+		a.pendingWinCmd = false
+		a.statusbar.SetHelpHint(a.defaultHelpHint())
+		return a.handleWindowChord(msg)
+	}
+
 	// Reaction-nav sub-state (intercept before normal keys).
 	if a.focusedPanel == PanelMessages && a.messagepane.ReactionNavActive() {
 		return a.handleReactionNav(msg)
@@ -64,6 +75,11 @@ func handleNormalMode(a *App, msg tea.KeyMsg) tea.Cmd {
 		if a.threadVisible {
 			a.CloseThread()
 		}
+
+	case key.Matches(msg, a.keys.WindowPrefix):
+		a.pendingWinCmd = true
+		a.statusbar.SetHelpHint("ctrl+w …")
+		return nil
 
 	case key.Matches(msg, a.keys.Tab):
 		a.FocusNext()
