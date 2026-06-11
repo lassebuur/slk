@@ -17,7 +17,7 @@ func TestBoxSizeMatchesRender(t *testing.T) {
 	m.SetResults(manyItems(50), 80)
 
 	w, h := m.BoxSize(80, 24)
-	box := m.renderBox(80)
+	box := m.renderBox(80, 24)
 	if gw := lipgloss.Width(box); w != gw {
 		t.Errorf("BoxSize width = %d, rendered width = %d", w, gw)
 	}
@@ -87,13 +87,66 @@ func TestClickRowScrolledWindow(t *testing.T) {
 	m.Open()
 	submitQuery(&m, "deploy")
 	m.SetResults(manyItems(15), 15)
-	m.selected = 14 // window is [7, 15)
+	m.selected = 14 // window is [7, 15) at a 30-row terminal
 
-	if !m.ClickRow(80, 24, listTopOffset+0) {
+	if !m.ClickRow(80, 30, listTopOffset+0) {
 		t.Fatal("ClickRow on first visible row should return true")
 	}
 	if m.selected != 7 {
 		t.Errorf("ClickRow set selected=%d, want 7 (window start)", m.selected)
+	}
+}
+
+// TestShortTerminalClampsRows verifies the modal shrinks its scroll
+// window on short terminals: the outer box must fit within
+// termHeight-2, BoxSize must match the render, and ClickRow's
+// hit-testing must agree with the clamped window.
+func TestShortTerminalClampsRows(t *testing.T) {
+	m := New()
+	m.Open()
+	submitQuery(&m, "deploy")
+	m.SetResults(manyItems(50), 80) // scrollbar + "showing K of N" footer
+
+	const termH = 20
+	w, h := m.BoxSize(80, termH)
+	if h > termH-2 {
+		t.Errorf("BoxSize height = %d, must fit in %d-row terminal (max %d)", h, termH, termH-2)
+	}
+	box := m.renderBox(80, termH)
+	if gw, gh := lipgloss.Width(box), lipgloss.Height(box); gw != w || gh != h {
+		t.Errorf("rendered %dx%d, BoxSize %dx%d", gw, gh, w, h)
+	}
+
+	// ClickRow agrees with the clamped window.
+	start, end := m.visibleWindow(termH)
+	rows := end - start
+	if rows < 1 {
+		t.Fatalf("clamped window is empty: [%d,%d)", start, end)
+	}
+	if !m.ClickRow(80, termH, listTopOffset+(rows-1)*rowLines) {
+		t.Error("last clamped row should be clickable")
+	}
+	if m.ClickRow(80, termH, listTopOffset+rows*rowLines) {
+		t.Error("row past the clamped window should not be clickable")
+	}
+}
+
+// TestTinyTerminalKeepsOneRow verifies the clamp never goes below one
+// visible row, even when the terminal can't fit the full chrome.
+func TestTinyTerminalKeepsOneRow(t *testing.T) {
+	m := New()
+	m.Open()
+	submitQuery(&m, "deploy")
+	m.SetResults(manyItems(50), 80)
+
+	start, end := m.visibleWindow(5)
+	if end-start != 1 {
+		t.Errorf("tiny-terminal window = [%d,%d), want exactly 1 row", start, end)
+	}
+	box := m.renderBox(80, 5)
+	w, h := m.BoxSize(80, 5)
+	if gw, gh := lipgloss.Width(box), lipgloss.Height(box); gw != w || gh != h {
+		t.Errorf("rendered %dx%d, BoxSize %dx%d", gw, gh, w, h)
 	}
 }
 

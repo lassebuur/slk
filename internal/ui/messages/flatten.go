@@ -13,6 +13,10 @@ import (
 var (
 	userMentionWithLabelRe = regexp.MustCompile(`<@([A-Z0-9]+)\|([^>]+)>`)
 	specialMentionRe       = regexp.MustCompile(`<!(here|channel|everyone)(?:\|[^>]*)?>`)
+	// Usergroup mentions: <!subteam^SID|@label> or bare <!subteam^SID>.
+	// Group 1 is the optional label (conventionally already "@"-prefixed
+	// on the wire, but not guaranteed).
+	usergroupMentionRe = regexp.MustCompile(`<!subteam\^[A-Z0-9]+(?:\|([^>]+))?>`)
 )
 
 // FlattenMrkdwn converts Slack mrkdwn entity tokens into plain text for
@@ -26,6 +30,7 @@ var (
 //	<url|label>      -> label
 //	<url>            -> url (mailto: scheme dropped from display)
 //	<!here> etc.     -> @here / @channel / @everyone
+//	<!subteam^S1|@eng> -> @eng (unlabeled form -> @group)
 //	<!date^..|fall>  -> fall
 //	&amp; &lt; &gt;  -> & < >
 //
@@ -77,6 +82,17 @@ func FlattenMrkdwn(text string, resolveUser, resolveChannel func(id string) (str
 
 	text = specialMentionRe.ReplaceAllStringFunc(text, func(match string) string {
 		return "@" + specialMentionRe.FindStringSubmatch(match)[1]
+	})
+
+	text = usergroupMentionRe.ReplaceAllStringFunc(text, func(match string) string {
+		label := usergroupMentionRe.FindStringSubmatch(match)[1]
+		if label == "" {
+			// Bare token: there's no local usergroup cache to resolve
+			// SIDs against, so a generic placeholder beats leaking the
+			// raw <!subteam^S...> wire form into a snippet.
+			return "@group"
+		}
+		return "@" + strings.TrimPrefix(label, "@")
 	})
 
 	// Wire-format escapes, decoded last so they can't be reinterpreted

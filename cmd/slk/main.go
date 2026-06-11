@@ -2102,12 +2102,14 @@ func pickAttachmentURL(f slack.File, kind string) string {
 	return f.URLPrivate
 }
 
-// resolveUserCached returns the display name for userID using only
+// lookupUserCached returns the display name for userID using only
 // local sources: the in-memory userNames map and the cached users
-// table. Never hits the network. Returns ("", false) when the user
-// is unknown — caller is expected to fall back to userID-as-name and
-// enqueue an async lookup via wctx.UserResolver.Request.
-func resolveUserCached(userID string, userNames map[string]string, db *cache.DB) (string, bool) {
+// table. Never hits the network and NEVER writes to userNames — safe
+// to call from goroutines off the UI loop (e.g. the search cmd),
+// where a map write would race the UI goroutine (see the
+// concurrent-map-writes note on userResolver.Request). Returns
+// ("", false) when the user is unknown.
+func lookupUserCached(userID string, userNames map[string]string, db *cache.DB) (string, bool) {
 	if userID == "" {
 		return "", false
 	}
@@ -2121,12 +2123,25 @@ func resolveUserCached(userID string, userNames map[string]string, db *cache.DB)
 				name = u.Name
 			}
 			if name != "" {
-				userNames[userID] = name
 				return name, true
 			}
 		}
 	}
 	return "", false
+}
+
+// resolveUserCached is lookupUserCached plus map memoization: a DB hit
+// is written back to userNames so subsequent lookups skip SQLite.
+// UI-goroutine callers only — the map write is what lookupUserCached
+// exists to avoid. Returns ("", false) when the user is unknown —
+// caller is expected to fall back to userID-as-name and enqueue an
+// async lookup via wctx.UserResolver.Request.
+func resolveUserCached(userID string, userNames map[string]string, db *cache.DB) (string, bool) {
+	name, ok := lookupUserCached(userID, userNames, db)
+	if ok {
+		userNames[userID] = name
+	}
+	return name, ok
 }
 
 // resolveUser ensures we have the display name and avatar for a user.
@@ -2837,8 +2852,11 @@ func searchWorkspaceFunc(router *workspaceRouter, db *cache.DB, tsFormat string)
 		if err != nil {
 			return ui.WorkspaceSearchResultsMsg{Query: query, Err: err}
 		}
+		// Read-only lookup: this closure runs in a bubbletea cmd
+		// goroutine, so it must not write wctx.UserNames (shared with
+		// the UI goroutine; see userResolver.Request).
 		resolveUser := func(id string) (string, bool) {
-			return resolveUserCached(id, wctx.UserNames, db)
+			return lookupUserCached(id, wctx.UserNames, db)
 		}
 		resolveChannel := func(id string) (string, bool) {
 			if db == nil {

@@ -149,25 +149,25 @@ func TestSpaceKeyAppendsSpace(t *testing.T) {
 
 func TestViewSmoke(t *testing.T) {
 	m := New()
-	if got := m.View(80); got != "" {
+	if got := m.View(80, 24); got != "" {
 		t.Fatalf("hidden View = %q, want empty", got)
 	}
 	m.Open()
 	for _, r := range "deploy" {
 		m.HandleKey(string(r))
 	}
-	out := m.View(80)
+	out := m.View(80, 24)
 	if out == "" || !strings.Contains(out, "deploy") {
 		t.Fatal("View must render the query")
 	}
 
 	m.HandleKey("enter")
-	if out := m.View(80); !strings.Contains(out, "Searching") {
+	if out := m.View(80, 24); !strings.Contains(out, "Searching") {
 		t.Fatal("loading View must show spinner line")
 	}
 
 	m.SetResults(items(), 5)
-	out = m.View(80)
+	out = m.View(80, 24)
 	if !strings.Contains(out, "general") || !strings.Contains(out, "grant") {
 		t.Fatal("results View must show channel and author")
 	}
@@ -180,7 +180,7 @@ func TestViewSmoke(t *testing.T) {
 	m.HandleKey("x")
 	m.HandleKey("enter")
 	m.SetError("rate limited")
-	if out := m.View(80); !strings.Contains(out, "rate limited") {
+	if out := m.View(80, 24); !strings.Contains(out, "rate limited") {
 		t.Fatal("error View must show error message")
 	}
 }
@@ -232,7 +232,9 @@ func TestScrollbarAppearsOnOverflow(t *testing.T) {
 	submitQuery(&m, "deploy")
 	m.SetResults(manyItems(50), 50)
 
-	lines := strings.Split(ansi.Strip(m.View(80)), "\n")
+	// 30 rows: tall enough for the full maxVisibleRows window (a 24-row
+	// terminal clamps to 7 rows; see visibleRowCap).
+	lines := strings.Split(ansi.Strip(m.View(80, 30)), "\n")
 	// The gutter spans both lines of every visible row.
 	rows := lines[listTopOffset : listTopOffset+2*maxVisibleRows]
 	var thumbs, tracks int
@@ -268,7 +270,7 @@ func TestNoScrollbarWhenListFits(t *testing.T) {
 	submitQuery(&m, "deploy")
 	m.SetResults(manyItems(3), 3)
 
-	lines := strings.Split(ansi.Strip(m.View(80)), "\n")
+	lines := strings.Split(ansi.Strip(m.View(80, 24)), "\n")
 	for i, row := range lines[listTopOffset : listTopOffset+2*3] {
 		if g := gutterRune(row); g != ' ' {
 			t.Fatalf("line %d gutter = %q, want blank (no scrollbar)", i, g)
@@ -285,9 +287,32 @@ func TestSnippetSanitization(t *testing.T) {
 			Text: "a\tb\rc\nd\x07e"},
 	}, 1)
 
-	plain := ansi.Strip(m.View(80))
+	plain := ansi.Strip(m.View(80, 24))
 	if !strings.Contains(plain, "a bc de") {
 		t.Fatalf("snippet not sanitized; view:\n%s", plain)
+	}
+}
+
+// TestHeaderFieldsSanitized verifies control characters in the channel
+// or author name (hostile or odd server data) can't wrap the box or
+// desync the width math: header fields get the same flattenText
+// treatment as snippets.
+func TestHeaderFieldsSanitized(t *testing.T) {
+	m := New()
+	m.Open()
+	submitQuery(&m, "deploy")
+	m.SetResults([]Item{
+		{ChannelID: "C1", ChannelName: "gen\neral", UserName: "gr\tant", TS: "1.0", Text: "hi"},
+	}, 1)
+
+	box := m.renderBox(80, 24)
+	w, h := m.BoxSize(80, 24)
+	if gw, gh := lipgloss.Width(box), lipgloss.Height(box); gw != w || gh != h {
+		t.Errorf("rendered %dx%d, BoxSize %dx%d (control chars in header?)", gw, gh, w, h)
+	}
+	plain := ansi.Strip(box)
+	if !strings.Contains(plain, "#gen eral") || !strings.Contains(plain, "gr ant") {
+		t.Errorf("header fields not flattened; view:\n%s", plain)
 	}
 }
 
@@ -300,7 +325,7 @@ func TestDMRowsRenderAtSigil(t *testing.T) {
 		{ChannelID: "C1", ChannelName: "general", UserName: "grant", TS: "2.0", Text: "yo"},
 	}, 2)
 
-	plain := ansi.Strip(m.View(80))
+	plain := ansi.Strip(m.View(80, 24))
 	if !strings.Contains(plain, "@ayush") {
 		t.Errorf("DM row must render @name; view:\n%s", plain)
 	}
@@ -320,7 +345,7 @@ func TestLongQueryDoesNotWrapBox(t *testing.T) {
 	}
 	m.HandleKey("!") // distinctive tail rune
 
-	box := m.renderBox(80)
+	box := m.renderBox(80, 24)
 	w, h := m.BoxSize(80, 24)
 	if gw := lipgloss.Width(box); gw != w {
 		t.Errorf("rendered width = %d, BoxSize width = %d", gw, w)
@@ -340,7 +365,7 @@ func TestErrorNewlinesFlattened(t *testing.T) {
 	submitQuery(&m, "deploy")
 	m.SetError("line1\nline2")
 
-	box := m.renderBox(80)
+	box := m.renderBox(80, 24)
 	w, h := m.BoxSize(80, 24)
 	if gw, gh := lipgloss.Width(box), lipgloss.Height(box); gw != w || gh != h {
 		t.Errorf("rendered %dx%d, BoxSize %dx%d", gw, gh, w, h)
@@ -378,6 +403,7 @@ func TestScrollWindowEdges(t *testing.T) {
 	submitQuery(&m, "deploy")
 	m.SetResults(manyItems(15), 15)
 
+	// 30 rows: tall enough for the full maxVisibleRows window.
 	// Walk to the bottom: window pins to the last 8 items.
 	for i := 0; i < 20; i++ {
 		m.HandleKey("down")
@@ -385,7 +411,7 @@ func TestScrollWindowEdges(t *testing.T) {
 	if m.selected != 14 {
 		t.Fatalf("selected = %d, want 14", m.selected)
 	}
-	if start, end := m.visibleWindow(); start != 7 || end != 15 {
+	if start, end := m.visibleWindow(30); start != 7 || end != 15 {
 		t.Fatalf("bottom window = [%d,%d), want [7,15)", start, end)
 	}
 
@@ -396,7 +422,7 @@ func TestScrollWindowEdges(t *testing.T) {
 	if m.selected != 0 {
 		t.Fatalf("selected = %d, want 0", m.selected)
 	}
-	if start, end := m.visibleWindow(); start != 0 || end != 8 {
+	if start, end := m.visibleWindow(30); start != 0 || end != 8 {
 		t.Fatalf("top window = [%d,%d), want [0,8)", start, end)
 	}
 }
@@ -404,7 +430,7 @@ func TestScrollWindowEdges(t *testing.T) {
 // resultLines returns the stripped rendered list lines for the current
 // visible window (2 lines per result row).
 func resultLines(m Model, n int) []string {
-	lines := strings.Split(ansi.Strip(m.View(80)), "\n")
+	lines := strings.Split(ansi.Strip(m.View(80, 24)), "\n")
 	return lines[listTopOffset : listTopOffset+n]
 }
 
@@ -457,10 +483,42 @@ func TestTwoLineContinuationNoMidRunSplitOfWideRunes(t *testing.T) {
 	}, 1)
 
 	lines := resultLines(m, 2)
+	// Every full screen line (borders included) is exactly the box wide;
+	// a mid-rune split or unclipped overflow would change that.
 	for i, l := range lines {
-		if w := lipgloss.Width(l); w > 80 {
-			t.Errorf("line %d width = %d, exceeds box", i, w)
+		if w := lipgloss.Width(l); w != boxWidth(80) {
+			t.Errorf("line %d width = %d, want boxWidth(80) = %d", i, w, boxWidth(80))
 		}
+	}
+
+	// Extract the snippet portion of each line: the snippet is the only
+	// source of these wide runes, so filtering to the snippet alphabet
+	// drops the header, borders, padding, and the "…" overflow marker.
+	// A mid-rune byte split would also surface here: the resulting
+	// invalid UTF-8 decodes to U+FFFD, which is not in the alphabet, so
+	// the broken rune goes missing and head+tail stops being a prefix.
+	wideSet := map[rune]bool{}
+	for _, r := range "日本語テキスト" {
+		wideSet[r] = true
+	}
+	extract := func(s string) string {
+		var b strings.Builder
+		for _, r := range s {
+			if wideSet[r] {
+				b.WriteRune(r)
+			}
+		}
+		return b.String()
+	}
+	head, tail := extract(lines[0]), extract(lines[1])
+	if head == "" || tail == "" {
+		t.Fatalf("expected snippet content on both lines; head=%q tail=%q", head, tail)
+	}
+	// Continuity: line1's snippet followed by line2's must reproduce the
+	// start of the original text — no dropped, duplicated, or reordered
+	// runes across the split.
+	if got := head + tail; !strings.HasPrefix(wide, got) {
+		t.Errorf("head+tail is not a prefix of the original snippet (content dropped/duplicated at the split):\nhead=%q\ntail=%q", head, tail)
 	}
 }
 

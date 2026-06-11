@@ -185,8 +185,8 @@ const rowLines = 2
 // row. Result rows are rowLines tall; a click on any line of a row
 // selects it. When the click lands on a visible list row it moves the
 // selection there and returns true; otherwise it returns false.
-// termWidth/termHeight are accepted for interface symmetry and
-// currently unused.
+// termHeight feeds the same window clamp the renderer uses; termWidth
+// is accepted for interface symmetry and currently unused.
 func (m *Model) ClickRow(termWidth, termHeight, localY int) bool {
 	if m.st != stateResults {
 		// Body rows in the input/loading/error states aren't results.
@@ -197,7 +197,7 @@ func (m *Model) ClickRow(termWidth, termHeight, localY int) bool {
 		return false
 	}
 	row := line / rowLines
-	start, end := m.visibleWindow()
+	start, end := m.visibleWindow(termHeight)
 	if row >= end-start {
 		return false
 	}
@@ -238,11 +238,35 @@ func boxWidth(termWidth int) int {
 	return w
 }
 
+// visibleRowCap returns the scroll-window height in result rows for a
+// terminal of termHeight lines: maxVisibleRows, reduced so the outer
+// box (rows*rowLines + chrome + optional footer) fits within
+// termHeight-2, but never below 1 row. Single source of truth for
+// visibleWindow, so the renderer, BoxSize, and ClickRow all clamp
+// identically.
+func (m Model) visibleRowCap(termHeight int) int {
+	// Chrome: top border + top padding + title + input + blank +
+	// bottom padding + bottom border = 7 (see BoxSize), plus the
+	// "showing K of N" footer when the server reported more matches.
+	chrome := 7
+	if m.total > len(m.items) {
+		chrome++
+	}
+	n := (termHeight - 2 - chrome) / rowLines
+	if n > maxVisibleRows {
+		n = maxVisibleRows
+	}
+	if n < 1 {
+		n = 1
+	}
+	return n
+}
+
 // visibleWindow returns the [start, end) slice of m.items currently
-// shown in the results list, applying the same scroll-window math the
-// renderer uses.
-func (m *Model) visibleWindow() (int, int) {
-	maxVisible := maxVisibleRows
+// shown in the results list for a terminal of termHeight lines,
+// applying the same scroll-window math the renderer uses.
+func (m *Model) visibleWindow(termHeight int) (int, int) {
+	maxVisible := m.visibleRowCap(termHeight)
 	total := len(m.items)
 	if maxVisible > total {
 		maxVisible = total
@@ -263,11 +287,10 @@ func (m *Model) visibleWindow() (int, int) {
 }
 
 // BoxSize returns the outer dimensions of the rendered modal box for the
-// given terminal size. termHeight is unused (this modal's height depends
-// only on its row count) but kept for interface symmetry with overlays
-// whose height is terminal-dependent.
+// given terminal size. termHeight clamps the visible result rows so the
+// outer box fits within the terminal (see visibleWindow).
 func (m *Model) BoxSize(termWidth, termHeight int) (int, int) {
-	nRows := len(m.bodyLines(boxWidth(termWidth) - 4))
+	nRows := len(m.bodyLines(boxWidth(termWidth)-4, termHeight))
 	if nRows < 1 {
 		nRows = 1
 	}
@@ -277,8 +300,8 @@ func (m *Model) BoxSize(termWidth, termHeight int) (int, int) {
 }
 
 // View renders just the overlay box.
-func (m Model) View(termWidth int) string {
-	return m.renderBox(termWidth)
+func (m Model) View(termWidth, termHeight int) string {
+	return m.renderBox(termWidth, termHeight)
 }
 
 // ViewOverlay renders the overlay as a centered modal with a dark backdrop.
@@ -287,7 +310,7 @@ func (m Model) ViewOverlay(termWidth, termHeight int, background string) string 
 		return background
 	}
 
-	box := m.renderBox(termWidth)
+	box := m.renderBox(termWidth, termHeight)
 	if box == "" {
 		return background
 	}
@@ -295,7 +318,7 @@ func (m Model) ViewOverlay(termWidth, termHeight int, background string) string 
 	return overlay.DimmedOverlay(termWidth, termHeight, background, box, 0.5)
 }
 
-func (m Model) renderBox(termWidth int) string {
+func (m Model) renderBox(termWidth, termHeight int) string {
 	if !m.visible {
 		return ""
 	}
@@ -343,7 +366,7 @@ func (m Model) renderBox(termWidth int) string {
 		Foreground(styles.TextPrimary).
 		Render(inputText)
 
-	content := title + "\n" + input + "\n\n" + strings.Join(m.bodyLines(innerWidth), "\n")
+	content := title + "\n" + input + "\n\n" + strings.Join(m.bodyLines(innerWidth, termHeight), "\n")
 
 	// Re-paint modal bg+fg after every ANSI reset emitted by inner styled
 	// spans so trailing cells don't inherit the dimmed app behind the
@@ -364,8 +387,9 @@ func (m Model) renderBox(termWidth int) string {
 // bodyLines renders the rows below the input line for the current state:
 // a spinner line while loading, the error line, a "No results"
 // placeholder, or the result rows plus an optional "showing K of N"
-// footer. innerWidth is the usable content width inside the box.
-func (m Model) bodyLines(innerWidth int) []string {
+// footer. innerWidth is the usable content width inside the box;
+// termHeight clamps the result-row window (see visibleWindow).
+func (m Model) bodyLines(innerWidth, termHeight int) []string {
 	bg := styles.Background
 	muted := lipgloss.NewStyle().Background(bg).Foreground(styles.TextMuted)
 
@@ -382,7 +406,7 @@ func (m Model) bodyLines(innerWidth int) []string {
 		if len(m.items) == 0 {
 			return []string{muted.Italic(true).Render("No results")}
 		}
-		return m.resultRows(innerWidth)
+		return m.resultRows(innerWidth, termHeight)
 	default: // stateInput
 		return []string{""}
 	}
@@ -391,6 +415,10 @@ func (m Model) bodyLines(innerWidth int) []string {
 // splitAtWidth splits plain (ANSI-free) text at the widest cell
 // boundary that fits within w columns: head is at most w cells wide,
 // tail is the untouched remainder. Wide runes are never split.
+// Caveat: the boundary is rune-based, so a multi-rune grapheme cluster
+// (e.g. a ZWJ emoji sequence 👩‍🚀) can be split across head and tail —
+// each half renders as its constituent runes rather than the composed
+// glyph. Cosmetic only; no bytes are lost.
 func splitAtWidth(s string, w int) (head, tail string) {
 	if w <= 0 {
 		return "", s
@@ -412,11 +440,11 @@ func splitAtWidth(s string, w int) (head, tail string) {
 // fetched list overflows the visible window a proportional scrollbar
 // gutter is drawn on the right (same pattern as channelfinder/
 // workspacefinder/themeswitcher), spanning both lines of each row.
-func (m Model) resultRows(innerWidth int) []string {
+func (m Model) resultRows(innerWidth, termHeight int) []string {
 	bg := styles.Background
 
 	total := len(m.items)
-	startIdx, endIdx := m.visibleWindow()
+	startIdx, endIdx := m.visibleWindow(termHeight)
 	maxVisible := endIdx - startIdx
 
 	showScrollbar := total > maxVisible
@@ -468,14 +496,18 @@ func (m Model) resultRows(innerWidth int) []string {
 			sigil = "@"
 		}
 		snippet := flattenText(item.Text)
+		// Header fields are flattened too: a control rune in a channel
+		// or author name would break the width math below.
+		channelName := flattenText(item.ChannelName)
+		userName := flattenText(item.UserName)
 
 		// Line 1: header + as much snippet as fits. The plain header
 		// width (snippet is plain too — flattenText emits no ANSI)
 		// decides the split point.
-		headerPlain := sigil + item.ChannelName + "  " + item.UserName + "  " + item.Timestamp + "  "
+		headerPlain := sigil + channelName + "  " + userName + "  " + item.Timestamp + "  "
 		part1, rest := splitAtWidth(snippet, contentWidth-lipgloss.Width(headerPlain))
-		line1 := chanStyle.Render(sigil+item.ChannelName) + "  " +
-			nameStyle.Render(item.UserName) + "  " +
+		line1 := chanStyle.Render(sigil+channelName) + "  " +
+			nameStyle.Render(userName) + "  " +
 			chanStyle.Render(item.Timestamp) + "  " +
 			textStyle.Render(part1)
 		// Defensive: an overlong header (part1 already "") still must
