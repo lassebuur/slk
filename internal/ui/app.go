@@ -151,6 +151,11 @@ type App struct {
 	// clipboard contents. Tests inject fakes via SetClipboardReader.
 	clipboardRead clipboardReader
 
+	// clipboardWrite is the function used by copyPermalink and drag-copy
+	// to write OS clipboard contents. Tests inject fakes via
+	// SetClipboardWriter.
+	clipboardWrite clipboardWriter
+
 	// threads is the App's ThreadService collaborator (fetch / mark /
 	// reply / list-fetch + parent-channel last-read lookup for the
 	// unread boundary). See internal/ui/services.go. Defaulted to a
@@ -422,6 +427,7 @@ func NewApp() *App {
 		browserOpener:        openURLCmd,
 		navHistory:           newNavHistoryStore(),
 		clipboardRead:        defaultClipboardReader,
+		clipboardWrite:       defaultClipboardWriter,
 	}
 	app.editing = newEditController()
 	// typing tracker is referenced by typingOut so it must exist first;
@@ -912,7 +918,7 @@ func (a *App) copyPermalinkOfSelected() tea.Cmd {
 		if !a.clipboardAvailable {
 			return statusbar.PermalinkCopyFailedMsg{}
 		}
-		_ = clipboard.Write(clipboard.FmtText, []byte(url))
+		_ = a.clipboardWrite(clipboard.FmtText, []byte(url))
 
 		return statusbar.PermalinkCopiedMsg{}
 	}
@@ -1745,6 +1751,17 @@ func (a *App) SetClipboardReader(fn clipboardReader) {
 		return
 	}
 	a.clipboardRead = fn
+}
+
+// SetClipboardWriter replaces the clipboard write function. Used by
+// tests to inject a fake writer. Pass nil to restore the default
+// real clipboard writer.
+func (a *App) SetClipboardWriter(fn clipboardWriter) {
+	if fn == nil {
+		a.clipboardWrite = defaultClipboardWriter
+		return
+	}
+	a.clipboardWrite = fn
 }
 
 // SetThreadService wires the App's ThreadService collaborator
