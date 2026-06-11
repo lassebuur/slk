@@ -5,16 +5,16 @@
 // Owns the three Update arms for reaction WS echoes / API results:
 //
 //	ReactionAddedMsg    - server confirmed a reaction was added.
-//	                      WS echoes of our own optimistic updates
-//	                      are filtered by currentUserID; remote
-//	                      users' reactions are merged into the
-//	                      message's reaction list.
+//	                      Applied unconditionally; updateReactionOnMessage
+//	                      is idempotent per (emoji, userID), so the echo
+//	                      of our own optimistic update collapses to one
+//	                      count while reactions from other users (or our
+//	                      own from another device) still merge in live.
 //	ReactionRemovedMsg  - server confirmed a reaction was removed
-//	                      (same WS-echo dedup as Added).
-//	ReactionSentMsg     - our reaction API call completed. On failure
-//	                      the optimistic update is rolled back (inverse
-//	                      op) and logged, so a rejected reaction doesn't
-//	                      linger on screen.
+//	                      (same idempotent application as Added).
+//	ReactionSentMsg     - our reaction API call completed. On failure the
+//	                      optimistic update is rolled back (inverse op) and
+//	                      logged, so a rejected reaction doesn't linger.
 //
 // Free reducer (no dedicated controller) because reactions are a
 // per-message annotation with no cross-message invariant and no
@@ -32,18 +32,17 @@ import (
 var reduceReactions reducerFunc = func(a *App, msg tea.Msg) (tea.Cmd, bool) {
 	switch m := msg.(type) {
 	case ReactionAddedMsg:
-		// Skip WebSocket echo of our own optimistic updates: when
-		// we add a reaction the UI updates immediately; the echo
-		// arrives later with our own userID and is dropped.
-		if m.UserID != a.currentUserID {
-			a.updateReactionOnMessage(m.ChannelID, m.MessageTS, m.Emoji, m.UserID, false)
-		}
+		// Apply every reaction event, including echoes of our own.
+		// updateReactionOnMessage is idempotent per (emoji, userID), so
+		// our optimistic update and the WS echo that follows it collapse
+		// to a single count — while reactions we make from another device
+		// (web/mobile), which have no optimistic update here, still show
+		// up live instead of being dropped.
+		a.updateReactionOnMessage(m.ChannelID, m.MessageTS, m.Emoji, m.UserID, false)
 		return nil, true
 
 	case ReactionRemovedMsg:
-		if m.UserID != a.currentUserID {
-			a.updateReactionOnMessage(m.ChannelID, m.MessageTS, m.Emoji, m.UserID, true)
-		}
+		a.updateReactionOnMessage(m.ChannelID, m.MessageTS, m.Emoji, m.UserID, true)
 		return nil, true
 
 	case ReactionSentMsg:

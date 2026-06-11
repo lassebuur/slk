@@ -40,6 +40,7 @@ import (
 	"github.com/gammons/slk/internal/ui/presencemenu"
 	"github.com/gammons/slk/internal/ui/reactionpicker"
 	"github.com/gammons/slk/internal/ui/reactionsview"
+	"github.com/gammons/slk/internal/ui/searchresults"
 	"github.com/gammons/slk/internal/ui/sidebar"
 	"github.com/gammons/slk/internal/ui/statusbar"
 	"github.com/gammons/slk/internal/ui/styles"
@@ -92,6 +93,7 @@ type App struct {
 	compose          compose.Model
 	statusbar        statusbar.Model
 	channelFinder    channelfinder.Model
+	searchResults    searchresults.Model
 	newMessagePicker newmessagepicker.Model
 	workspaceFinder  workspacefinder.Model
 	themeSwitcher    themeswitcher.Model
@@ -174,6 +176,11 @@ type App struct {
 	// clipboardRead is the function used by smartPaste to read OS
 	// clipboard contents. Tests inject fakes via SetClipboardReader.
 	clipboardRead clipboardReader
+
+	// clipboardWrite is the function used by copyPermalink and drag-copy
+	// to write OS clipboard contents. Tests inject fakes via
+	// SetClipboardWriter.
+	clipboardWrite clipboardWriter
 
 	// threads is the App's ThreadService collaborator (fetch / mark /
 	// reply / list-fetch + parent-channel last-read lookup for the
@@ -287,6 +294,16 @@ type App struct {
 	// thread-open completes when that channel's messages land. See
 	// reducer_links.go.
 	pendingLinkNav *pendingLinkNav
+
+	// search is the active in-channel search (nil = none).
+	// searchInput is the prompt buffer while in ModeSearch.
+	// searchGen is a monotonic generation counter: bumped on every
+	// dispatch and clear, echoed through ChannelSearchResultsMsg.Gen
+	// so stale in-flight results are dropped (see reducer_search.go).
+	search      *activeSearch
+	searchInput string
+	searchGen   uint64
+	searchSvc   SearchService
 
 	// browserOpener launches a URL in the OS browser. Defaults to
 	// openURLCmd; tests inject fakes.
@@ -424,6 +441,7 @@ func NewApp() *App {
 		compose:              compose.New(""),
 		statusbar:            statusbar.New(),
 		channelFinder:        channelfinder.New(),
+		searchResults:        searchresults.New(),
 		newMessagePicker:     newmessagepicker.New(),
 		workspaceFinder:      workspacefinder.New(),
 		themeSwitcher:        themeswitcher.New(),
@@ -460,11 +478,13 @@ func NewApp() *App {
 		threads:              noopThreadService,
 		messageSvc:           noopMessageService,
 		channels:             noopChannelService,
+		searchSvc:            noopSearchService,
 		lastChannelByTeam:    map[string]string{},
 		workspaceDomains:     map[string]string{},
 		browserOpener:        openURLCmd,
 		navHistory:           newNavHistoryStore(),
 		clipboardRead:        defaultClipboardReader,
+		clipboardWrite:       defaultClipboardWriter,
 	}
 	// Root model deliberately bypasses newWindowModel: the config
 	// retention fields (avatarFn, userNames, emojiCtx, ...) are still
@@ -546,6 +566,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		reduceSend,
 		reduceChannels,
 		reduceLinks,
+		reduceSearch,
 		reduceWorkspace,
 		reduceNewMessagePicker,
 		reduceIO,
@@ -957,9 +978,11 @@ func (a *App) copyPermalinkOfSelected() tea.Cmd {
 	messageSvc := a.messageSvc
 	cID := ids.ChannelID(channelID)
 	mTS := ids.MessageTS(ts)
+
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
+
 		url, err := messageSvc.Permalink(ctx, cID, mTS)
 		if err != nil {
 			log.Printf("copy permalink: %v", err)
@@ -971,10 +994,13 @@ func (a *App) copyPermalinkOfSelected() tea.Cmd {
 			// false success toast.
 			return nil
 		}
-		return tea.BatchMsg{
-			tea.SetClipboard(url),
-			func() tea.Msg { return statusbar.PermalinkCopiedMsg{} },
+
+		if !a.clipboardAvailable {
+			return statusbar.PermalinkCopyFailedMsg{}
 		}
+		_ = a.clipboardWrite(clipboard.FmtText, []byte(url))
+
+		return statusbar.PermalinkCopiedMsg{}
 	}
 }
 
@@ -1799,6 +1825,29 @@ func (a *App) SetChannelService(s ChannelService) {
 	a.channels = s
 }
 
+// SetSearchService injects the search backend (wired by cmd/slk).
+// Build one via NewSearchService from a SearchServiceFuncs bundle.
+func (a *App) SetSearchService(s SearchService) {
+	if s == nil {
+		s = noopSearchService
+	}
+	a.searchSvc = s
+}
+
+// clearActiveSearch removes in-channel search state: highlights,
+// status segment, prompt buffer. It also invalidates any in-flight
+// query by bumping the generation counter. Always runs unguarded:
+// the status segment can be set without active state (e.g. the
+// "no matches" text), and the Set* calls below are no-ops when
+// already clear.
+func (a *App) clearActiveSearch() {
+	a.search = nil
+	a.searchInput = ""
+	a.searchGen++
+	a.messagepane.SetSearchTerms(nil)
+	a.statusbar.SetSearch("")
+}
+
 // SetMessageService wires the App's MessageService collaborator
 // (send / edit / delete / mark-unread / permalink). Build one via
 // NewMessageService from a MessageServiceFuncs bundle.
@@ -1831,6 +1880,17 @@ func (a *App) SetClipboardReader(fn clipboardReader) {
 		return
 	}
 	a.clipboardRead = fn
+}
+
+// SetClipboardWriter replaces the clipboard write function. Used by
+// tests to inject a fake writer. Pass nil to restore the default
+// real clipboard writer.
+func (a *App) SetClipboardWriter(fn clipboardWriter) {
+	if fn == nil {
+		a.clipboardWrite = defaultClipboardWriter
+		return
+	}
+	a.clipboardWrite = fn
 }
 
 // SetThreadService wires the App's ThreadService collaborator
@@ -2286,6 +2346,8 @@ func (a *App) SetReactionService(r ReactionService) {
 func (a *App) SetCurrentUserID(userID string) {
 	a.currentUserID = userID
 	a.threadsView.SetSelfUserID(userID)
+	a.messagepane.SetCurrentUser(userID)
+	a.threadPanel.SetCurrentUser(userID)
 }
 
 // SetNowTimestampFormatter wires the formatter used to render the

@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"image"
 	"io"
 	"log"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -29,6 +31,8 @@ import (
 	slackclient "github.com/gammons/slk/internal/slack"
 	"github.com/gammons/slk/internal/slack/membership"
 	"github.com/gammons/slk/internal/slackhttp"
+	"github.com/gammons/slk/internal/slackurl"
+	"github.com/gammons/slk/internal/text"
 	"github.com/gammons/slk/internal/ui"
 	"github.com/gammons/slk/internal/ui/channelfinder"
 	"github.com/gammons/slk/internal/ui/compose"
@@ -37,6 +41,7 @@ import (
 	"github.com/gammons/slk/internal/ui/messages/blockkit"
 	"github.com/gammons/slk/internal/ui/presencemenu"
 	"github.com/gammons/slk/internal/ui/reactionpicker"
+	"github.com/gammons/slk/internal/ui/searchresults"
 	"github.com/gammons/slk/internal/ui/sidebar"
 	"github.com/gammons/slk/internal/ui/statusbar"
 	"github.com/gammons/slk/internal/ui/styles"
@@ -329,6 +334,74 @@ func (r *userResolver) Request(userID string) {
 			r.send(ui.UserExternalMsg{UserID: userID, IsExternal: true})
 		}
 	}()
+}
+
+// RequestBot enqueues a bots.info fetch for a bot author (bot_message has
+// no `user`, only a `bot_id`). Keyed by botID so the resolved name +
+// avatar attach to messages whose UserID was set to the bot_id. username
+// is the name carried on the message (used as a fallback / immediate
+// value); bots.info supplies the icon (and a name if the message had
+// none). Mirrors Request: inflight dedup, cache-skip, async fetch,
+// Preload + UpsertUser + UserResolvedMsg (which AvatarReadyMsg follows).
+func (r *userResolver) RequestBot(botID, username string) {
+	if r == nil || botID == "" {
+		return
+	}
+	if _, exists := r.inflight.LoadOrStore(botID, struct{}{}); exists {
+		return
+	}
+	if _, err := r.db.GetUser(botID); err == nil {
+		r.inflight.Delete(botID)
+		return
+	}
+	go func() {
+		defer r.inflight.Delete(botID)
+		bot, err := r.client.GetBotInfo(context.Background(), botID)
+		if err != nil {
+			debuglog.Cache("userResolver: GetBotInfo team=%s bot=%s err=%v", r.teamID, botID, err)
+			return
+		}
+		name := username
+		if name == "" {
+			name = bot.Name
+		}
+		if name == "" {
+			name = botID
+		}
+		iconURL := bestBotIcon(bot.Icons)
+		r.avatars.Preload(botID, iconURL)
+		_ = r.db.UpsertUser(cache.User{
+			ID:          botID,
+			WorkspaceID: r.teamID,
+			Name:        name,
+			DisplayName: name,
+			AvatarURL:   iconURL,
+			Presence:    "away",
+			IsBot:       true,
+		})
+		if r.send != nil {
+			r.send(ui.UserResolvedMsg{
+				TeamID:      r.teamID,
+				UserID:      botID,
+				DisplayName: name,
+				IsBot:       true,
+			})
+		}
+	}()
+}
+
+// bestBotIcon returns the best bot icon URL for the avatar grid. The
+// avatar fetcher downscales to the avatar cell size, so we prefer the
+// 72px icon — large enough to render sharp yet almost always present —
+// then fall back through the other sizes by availability rather than
+// strictly by pixel size.
+func bestBotIcon(ic slack.Icons) string {
+	for _, u := range []string{ic.Image72, ic.Image48, ic.Image132, ic.Image36, ic.Image230} {
+		if u != "" {
+			return u
+		}
+	}
+	return ""
 }
 
 func main() {
@@ -1050,11 +1123,24 @@ func run() error {
 				if wctx == nil {
 					return nil
 				}
-				msgItems := fetchOlderMessages(wctx.Client, chIDStr, string(oldestTS), db, wctx.UserNames, tsFormat, avatarCache, router)
+				msgItems := fetchOlderMessages(wctx.Client, chIDStr, string(oldestTS), db, wctx.UserNames, tsFormat, router)
 				return ui.OlderMessagesLoadedMsg{
 					ChannelID: chIDStr,
+					AnchorTS:  string(oldestTS),
 					Messages:  msgItems,
 				}
+			},
+			FetchAround: func(channelID ids.ChannelID, ts ids.MessageTS) tea.Msg {
+				chIDStr := string(channelID)
+				wctx := router.Active()
+				if wctx == nil {
+					return nil
+				}
+				msgItems := fetchMessagesAround(wctx.Client, chIDStr, string(ts), db, wctx.UserNames, tsFormat, router)
+				if msgItems == nil {
+					return ui.MessagesAroundLoadedMsg{ChannelID: chIDStr, TargetTS: string(ts), Err: errors.New("history fetch failed")}
+				}
+				return ui.MessagesAroundLoadedMsg{ChannelID: chIDStr, TargetTS: string(ts), Messages: msgItems}
 			},
 			Join: func(channelID ids.ChannelID, channelName string) tea.Msg {
 				chIDStr := string(channelID)
@@ -1068,6 +1154,31 @@ func run() error {
 				}
 				return ui.ChannelJoinedMsg{ID: chIDStr, Name: channelName}
 			},
+		}))
+
+		app.SetSearchService(ui.NewSearchService(ui.SearchServiceFuncs{
+			SearchChannel: func(channelID ids.ChannelID, query string) tea.Msg {
+				wctx := router.Active()
+				if wctx == nil {
+					// Returning nil would leave the `/query  …` spinner
+					// stuck; surface the failure like searchWorkspaceFunc.
+					return ui.ChannelSearchResultsMsg{ChannelID: string(channelID), Query: query, Err: errors.New("no active workspace")}
+				}
+				terms := strings.Fields(query)
+				folded := make([]string, 0, len(terms))
+				for _, t := range terms {
+					folded = append(folded, text.Fold(t))
+				}
+				tses, err := db.SearchChannelMessages(string(channelID), wctx.Client.TeamID(), query)
+				return ui.ChannelSearchResultsMsg{
+					ChannelID: string(channelID),
+					Query:     query,
+					Terms:     folded,
+					TSes:      tses,
+					Err:       err,
+				}
+			},
+			SearchWorkspace: searchWorkspaceFunc(router, db, tsFormat),
 		}))
 
 		app.SetMessageService(ui.NewMessageService(ui.MessageServiceFuncs{
@@ -1573,6 +1684,7 @@ func run() error {
 				CustomEmoji:      wctx.CustomEmoji, // empty at this point; filled by the goroutine below
 				SectionsProvider: sectionsProviderAdapter{store: wctx.SectionStore},
 				InitialActive:    isInitial,
+				LastChannelID:    mostRecentlyVisitedChannel(wctx.LastVisitedByChannel),
 			})
 
 			// Fetch workspace custom emojis in the background. When done,
@@ -2059,12 +2171,14 @@ func pickAttachmentURL(f slack.File, kind string) string {
 	return f.URLPrivate
 }
 
-// resolveUserCached returns the display name for userID using only
+// lookupUserCached returns the display name for userID using only
 // local sources: the in-memory userNames map and the cached users
-// table. Never hits the network. Returns ("", false) when the user
-// is unknown — caller is expected to fall back to userID-as-name and
-// enqueue an async lookup via wctx.UserResolver.Request.
-func resolveUserCached(userID string, userNames map[string]string, db *cache.DB) (string, bool) {
+// table. Never hits the network and NEVER writes to userNames — safe
+// to call from goroutines off the UI loop (e.g. the search cmd),
+// where a map write would race the UI goroutine (see the
+// concurrent-map-writes note on userResolver.Request). Returns
+// ("", false) when the user is unknown.
+func lookupUserCached(userID string, userNames map[string]string, db *cache.DB) (string, bool) {
 	if userID == "" {
 		return "", false
 	}
@@ -2078,12 +2192,25 @@ func resolveUserCached(userID string, userNames map[string]string, db *cache.DB)
 				name = u.Name
 			}
 			if name != "" {
-				userNames[userID] = name
 				return name, true
 			}
 		}
 	}
 	return "", false
+}
+
+// resolveUserCached is lookupUserCached plus map memoization: a DB hit
+// is written back to userNames so subsequent lookups skip SQLite.
+// UI-goroutine callers only — the map write is what lookupUserCached
+// exists to avoid. Returns ("", false) when the user is unknown —
+// caller is expected to fall back to userID-as-name and enqueue an
+// async lookup via wctx.UserResolver.Request.
+func resolveUserCached(userID string, userNames map[string]string, db *cache.DB) (string, bool) {
+	name, ok := lookupUserCached(userID, userNames, db)
+	if ok {
+		userNames[userID] = name
+	}
+	return name, ok
 }
 
 // resolveUser ensures we have the display name and avatar for a user.
@@ -2147,7 +2274,46 @@ func resolveUser(client *slackclient.Client, userID string, userNames map[string
 	return userID, false
 }
 
-func fetchOlderMessages(client *slackclient.Client, channelID, latestTS string, db *cache.DB, userNames map[string]string, tsFormat string, avatarCache *avatar.Cache, router *workspaceRouter) []messages.MessageItem {
+// messageAuthor resolves the display identity for a fetched message.
+// Human messages carry a `user` ID, resolved (and lazily fetched) the
+// usual way. Bot messages (bot_message) have an empty `user` and only a
+// `bot_id` + `username`; those are keyed on the bot_id, use the message's
+// username for the name, and enqueue a bots.info lookup for the avatar
+// (and a name fallback). The returned userID is what both the cache row
+// and the MessageItem are keyed on so the avatar pipeline can attach.
+func messageAuthor(m slack.Message, userNames map[string]string, db *cache.DB, router *workspaceRouter) (userID, userName string) {
+	if m.User != "" {
+		name, ok := resolveUserCached(m.User, userNames, db)
+		if !ok {
+			name = m.User
+			if router != nil {
+				if wctx := router.Active(); wctx != nil && wctx.UserResolver != nil {
+					wctx.UserResolver.Request(m.User)
+				}
+			}
+		}
+		return m.User, name
+	}
+	if m.BotID != "" {
+		name := m.Username
+		if name == "" {
+			if cached, ok := resolveUserCached(m.BotID, userNames, db); ok {
+				name = cached
+			} else {
+				name = m.BotID
+			}
+		}
+		if router != nil {
+			if wctx := router.Active(); wctx != nil && wctx.UserResolver != nil {
+				wctx.UserResolver.RequestBot(m.BotID, m.Username)
+			}
+		}
+		return m.BotID, name
+	}
+	return m.User, m.User
+}
+
+func fetchOlderMessages(client *slackclient.Client, channelID, latestTS string, db *cache.DB, userNames map[string]string, tsFormat string, router *workspaceRouter) []messages.MessageItem {
 	ctx := context.Background()
 	debuglog.Cache("fetchOlderMessages: channel=%s latest_ts=%s entry", channelID, latestTS)
 	start := time.Now()
@@ -2158,16 +2324,56 @@ func fetchOlderMessages(client *slackclient.Client, channelID, latestTS string, 
 		return nil
 	}
 
+	msgItems := convertAndCacheHistory(client, channelID, history, db, userNames, tsFormat, router)
+
+	debuglog.Cache("fetchOlderMessages: channel=%s latest_ts=%s result %s dur_ms=%d (older history backfill)",
+		channelID, latestTS, summarizeMessages(msgItems), time.Since(start).Milliseconds())
+	return msgItems
+}
+
+// fetchMessagesAround fetches a history window centered on targetTS
+// for jump-to-message navigation. Mirrors fetchOlderMessages: upserts
+// into the cache, converts to MessageItems, returns ascending by TS.
+// Returns nil on network failure AND when the fetch succeeds but the
+// window is empty — callers cannot distinguish the two from the
+// return value alone (the FetchAround closure treats both as
+// failure).
+func fetchMessagesAround(client *slackclient.Client, channelID, targetTS string, db *cache.DB, userNames map[string]string, tsFormat string, router *workspaceRouter) []messages.MessageItem {
+	ctx := context.Background()
+	debuglog.Cache("fetchMessagesAround: channel=%s target_ts=%s entry", channelID, targetTS)
+	start := time.Now()
+	history, err := client.GetHistoryAround(ctx, channelID, targetTS, 25)
+	if err != nil {
+		debuglog.Cache("fetchMessagesAround: GetHistoryAround %s @ %s: %v dur_ms=%d (returning nil)",
+			channelID, targetTS, err, time.Since(start).Milliseconds())
+		return nil
+	}
+
+	msgItems := convertAndCacheHistory(client, channelID, history, db, userNames, tsFormat, router)
+
+	debuglog.Cache("fetchMessagesAround: channel=%s target_ts=%s result %s dur_ms=%d (jump-to-message window)",
+		channelID, targetTS, summarizeMessages(msgItems), time.Since(start).Milliseconds())
+	return msgItems
+}
+
+// convertAndCacheHistory is the shared tail of fetchOlderMessages and
+// fetchMessagesAround: upserts each fetched message (and its
+// reactions) into the cache, resolves user names, converts to
+// messages.MessageItem, and reverses the slice from Slack's
+// newest-first order to the ascending-by-TS convention used
+// throughout slk.
+func convertAndCacheHistory(client *slackclient.Client, channelID string, history []slack.Message, db *cache.DB, userNames map[string]string, tsFormat string, router *workspaceRouter) []messages.MessageItem {
 	var msgItems []messages.MessageItem
 	for _, m := range history {
 		rawBytes, _ := json.Marshal(m)
-		debuglog.Cache("fetchOlderMessages: upsert channel=%s ts=%s subtype=%q reply_count=%d files=%d",
+		debuglog.Cache("convertAndCacheHistory: upsert channel=%s ts=%s subtype=%q reply_count=%d files=%d",
 			channelID, m.Timestamp, m.SubType, m.ReplyCount, len(m.Files))
+		authorID, userName := messageAuthor(m, userNames, db, router)
 		db.UpsertMessage(cache.Message{
 			TS:          m.Timestamp,
 			ChannelID:   channelID,
 			WorkspaceID: client.TeamID(),
-			UserID:      m.User,
+			UserID:      authorID,
 			Text:        m.Text,
 			ThreadTS:    m.ThreadTimestamp,
 			ReplyCount:  m.ReplyCount,
@@ -2175,16 +2381,6 @@ func fetchOlderMessages(client *slackclient.Client, channelID, latestTS string, 
 			RawJSON:     string(rawBytes),
 			CreatedAt:   time.Now().Unix(),
 		})
-
-		userName, ok := resolveUserCached(m.User, userNames, db)
-		if !ok {
-			userName = m.User
-			if router != nil {
-				if wctx := router.Active(); wctx != nil && wctx.UserResolver != nil {
-					wctx.UserResolver.Request(m.User)
-				}
-			}
-		}
 
 		// Convert reactions
 		var reactions []messages.ReactionItem
@@ -2207,7 +2403,7 @@ func fetchOlderMessages(client *slackclient.Client, channelID, latestTS string, 
 
 		msgItems = append(msgItems, messages.MessageItem{
 			TS:                m.Timestamp,
-			UserID:            m.User,
+			UserID:            authorID,
 			UserName:          userName,
 			Text:              m.Text,
 			Timestamp:         formatTimestamp(m.Timestamp, tsFormat),
@@ -2226,8 +2422,6 @@ func fetchOlderMessages(client *slackclient.Client, channelID, latestTS string, 
 		msgItems[i], msgItems[j] = msgItems[j], msgItems[i]
 	}
 
-	debuglog.Cache("fetchOlderMessages: channel=%s latest_ts=%s result %s dur_ms=%d (older history backfill)",
-		channelID, latestTS, summarizeMessages(msgItems), time.Since(start).Milliseconds())
 	return msgItems
 }
 
@@ -2390,19 +2584,42 @@ func enrichCachedRow(
 	router *workspaceRouter,
 	stats *enrichPerfStats,
 ) messages.MessageItem {
+	// Bot rows cached before the bot-identity fix have an empty UserID but
+	// carry bot_id + username in raw_json. Re-key them on the bot_id and
+	// resolve the avatar/name via bots.info so cached bot messages render
+	// like freshly-fetched ones (without this they stay blank until a
+	// live re-fetch, which never reaches messages older than the latest 50).
+	effUserID := m.UserID
+	botUsername := ""
+	if effUserID == "" && m.RawJSON != "" {
+		var rawBot struct {
+			BotID    string `json:"bot_id"`
+			Username string `json:"username"`
+		}
+		if json.Unmarshal([]byte(m.RawJSON), &rawBot) == nil && rawBot.BotID != "" {
+			effUserID = rawBot.BotID
+			botUsername = rawBot.Username
+			if router != nil {
+				if wctx := router.Active(); wctx != nil && wctx.UserResolver != nil {
+					wctx.UserResolver.RequestBot(rawBot.BotID, rawBot.Username)
+				}
+			}
+		}
+	}
+
 	// Resolve username from the in-memory map first; fall back to
-	// the cached users table; finally fall back to the user ID
-	// itself so the row still renders something readable.
+	// the cached users table; finally fall back to the bot username /
+	// user ID so the row still renders something readable.
 	var userName string
 	if userNames != nil {
-		userName = userNames[m.UserID]
+		userName = userNames[effUserID]
 	}
-	if userName == "" && m.UserID != "" {
+	if userName == "" && effUserID != "" {
 		var t0 time.Time
 		if stats != nil {
 			t0 = time.Now()
 		}
-		u, err := db.GetUser(m.UserID)
+		u, err := db.GetUser(effUserID)
 		if stats != nil {
 			stats.getUserCalls++
 			stats.getUserTotal += time.Since(t0)
@@ -2414,18 +2631,24 @@ func enrichCachedRow(
 				userName = u.Name
 			}
 			if userName != "" && userNames != nil {
-				userNames[m.UserID] = userName
+				userNames[effUserID] = userName
 			}
 		}
 	}
 	if userName == "" {
-		userName = m.UserID
-		// Cache had no entry for this user. Enqueue an async resolver
-		// fetch so the next render after UserResolvedMsg lands shows
-		// the real display name instead of the raw user ID.
-		if router != nil && m.UserID != "" {
-			if wctx := router.Active(); wctx != nil && wctx.UserResolver != nil {
-				wctx.UserResolver.Request(m.UserID)
+		if botUsername != "" {
+			userName = botUsername
+		} else {
+			userName = effUserID
+			// Cache had no entry for this user. Enqueue an async resolver
+			// fetch so the next render after UserResolvedMsg lands shows
+			// the real display name instead of the raw user ID. Guarded on
+			// m.UserID (the original) so bot rows — already handled via
+			// RequestBot above — don't hit the users.info path.
+			if router != nil && m.UserID != "" {
+				if wctx := router.Active(); wctx != nil && wctx.UserResolver != nil {
+					wctx.UserResolver.Request(m.UserID)
+				}
 			}
 		}
 	}
@@ -2493,7 +2716,7 @@ func enrichCachedRow(
 
 	return messages.MessageItem{
 		TS:                m.TS,
-		UserID:            m.UserID,
+		UserID:            effUserID,
 		UserName:          userName,
 		Text:              m.Text,
 		Timestamp:         formatTimestamp(m.TS, tsFormat),
@@ -2576,11 +2799,12 @@ func fetchChannelMessages(client *slackclient.Client, channelID string, db *cach
 		rawBytes, _ := json.Marshal(m)
 		debuglog.Cache("fetchChannelMessages: upsert channel=%s ts=%s subtype=%q reply_count=%d files=%d",
 			channelID, m.Timestamp, m.SubType, m.ReplyCount, len(m.Files))
+		authorID, userName := messageAuthor(m, userNames, db, router)
 		db.UpsertMessage(cache.Message{
 			TS:          m.Timestamp,
 			ChannelID:   channelID,
 			WorkspaceID: client.TeamID(),
-			UserID:      m.User,
+			UserID:      authorID,
 			Text:        m.Text,
 			ThreadTS:    m.ThreadTimestamp,
 			ReplyCount:  m.ReplyCount,
@@ -2588,16 +2812,6 @@ func fetchChannelMessages(client *slackclient.Client, channelID string, db *cach
 			RawJSON:     string(rawBytes),
 			CreatedAt:   time.Now().Unix(),
 		})
-
-		userName, ok := resolveUserCached(m.User, userNames, db)
-		if !ok {
-			userName = m.User
-			if router != nil {
-				if wctx := router.Active(); wctx != nil && wctx.UserResolver != nil {
-					wctx.UserResolver.Request(m.User)
-				}
-			}
-		}
 
 		// Convert reactions
 		var reactions []messages.ReactionItem
@@ -2620,7 +2834,7 @@ func fetchChannelMessages(client *slackclient.Client, channelID string, db *cach
 
 		msgItems = append(msgItems, messages.MessageItem{
 			TS:                m.Timestamp,
-			UserID:            m.User,
+			UserID:            authorID,
 			UserName:          userName,
 			Text:              m.Text,
 			Timestamp:         formatTimestamp(m.Timestamp, tsFormat),
@@ -2668,11 +2882,12 @@ func fetchThreadReplies(client *slackclient.Client, channelID, threadTS string, 
 		rawBytes, _ := json.Marshal(m)
 		debuglog.Cache("fetchThreadReplies: upsert channel=%s ts=%s subtype=%q reply_count=%d files=%d",
 			channelID, m.Timestamp, m.SubType, m.ReplyCount, len(m.Files))
+		authorID, userName := messageAuthor(m, userNames, db, router)
 		db.UpsertMessage(cache.Message{
 			TS:          m.Timestamp,
 			ChannelID:   channelID,
 			WorkspaceID: client.TeamID(),
-			UserID:      m.User,
+			UserID:      authorID,
 			Text:        m.Text,
 			ThreadTS:    m.ThreadTimestamp,
 			ReplyCount:  m.ReplyCount,
@@ -2680,16 +2895,6 @@ func fetchThreadReplies(client *slackclient.Client, channelID, threadTS string, 
 			RawJSON:     string(rawBytes),
 			CreatedAt:   time.Now().Unix(),
 		})
-
-		userName, ok := resolveUserCached(m.User, userNames, db)
-		if !ok {
-			userName = m.User
-			if router != nil {
-				if wctx := router.Active(); wctx != nil && wctx.UserResolver != nil {
-					wctx.UserResolver.Request(m.User)
-				}
-			}
-		}
 
 		// Convert reactions
 		var reactions []messages.ReactionItem
@@ -2712,7 +2917,7 @@ func fetchThreadReplies(client *slackclient.Client, channelID, threadTS string, 
 
 		msgItems = append(msgItems, messages.MessageItem{
 			TS:                m.Timestamp,
-			UserID:            m.User,
+			UserID:            authorID,
 			UserName:          userName,
 			Text:              m.Text,
 			Timestamp:         formatTimestamp(m.Timestamp, tsFormat),
@@ -2738,6 +2943,117 @@ func fetchThreadReplies(client *slackclient.Client, channelID, threadTS string, 
 	debuglog.Cache("fetchThreadReplies: channel=%s thread_ts=%s result %s dur_ms=%d (authoritative replace)",
 		channelID, threadTS, summarizeMessages(out), time.Since(start).Milliseconds())
 	return out
+}
+
+// searchWorkspaceFunc builds the SearchService.SearchWorkspace
+// closure: a server-side search.messages query against the active
+// workspace. Always returns a WorkspaceSearchResultsMsg — a nil msg
+// would leave the ctrl+f modal spinner stuck (the reducer only exits
+// the loading state on a results msg).
+func searchWorkspaceFunc(router *workspaceRouter, db *cache.DB, tsFormat string) func(query string) tea.Msg {
+	return func(query string) tea.Msg {
+		wctx := router.Active()
+		if wctx == nil {
+			return ui.WorkspaceSearchResultsMsg{Query: query, Err: errors.New("no active workspace")}
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		res, err := wctx.Client.SearchMessages(ctx, query, 50)
+		if err != nil {
+			return ui.WorkspaceSearchResultsMsg{Query: query, Err: err}
+		}
+		// Read-only lookup: this closure runs in a bubbletea cmd
+		// goroutine, so it must not write wctx.UserNames (shared with
+		// the UI goroutine; see userResolver.Request).
+		resolveUser := func(id string) (string, bool) {
+			return lookupUserCached(id, wctx.UserNames, db)
+		}
+		resolveChannel := func(id string) (string, bool) {
+			if db == nil {
+				return "", false
+			}
+			if ch, err := db.GetChannel(id); err == nil && ch.Name != "" {
+				return ch.Name, true
+			}
+			return "", false
+		}
+		items := searchResultItems(res.Matches, tsFormat, time.Now(), resolveUser, resolveChannel)
+		return ui.WorkspaceSearchResultsMsg{Query: query, Items: items, Total: res.Total}
+	}
+}
+
+// userIDShapeRe matches a string shaped like a Slack user ID. DM hits
+// from search.messages carry the counterpart's raw user ID as the
+// channel "name"; this is the detection heuristic for that case.
+var userIDShapeRe = regexp.MustCompile(`^[UW][A-Z0-9]{5,}$`)
+
+// searchResultItems converts search.messages matches into the modal's
+// row items: snippets have mrkdwn entities flattened to plain text, DM
+// channel names (raw user IDs on the wire) are resolved to the
+// counterpart's display name, and thread TSes are recovered from
+// permalinks. Pure: all lookups go through the supplied resolvers.
+func searchResultItems(matches []slack.SearchMessage, tsFormat string, now time.Time, resolveUser, resolveChannel func(id string) (string, bool)) []searchresults.Item {
+	items := make([]searchresults.Item, 0, len(matches))
+	for _, match := range matches {
+		// ThreadTS comes from the hit's permalink. Known v1
+		// limitation: a thread-reply hit with an unparseable
+		// permalink degrades to plain-message nav, which may
+		// toast "Message not found in loaded history" (replies
+		// aren't in channel history).
+		threadTS := ""
+		if pl, ok := slackurl.Parse(match.Permalink); ok {
+			threadTS = string(pl.ThreadTS)
+		}
+
+		// DM detection: an IM channel ID (D...) is authoritative; a
+		// user-ID-shaped channel name counts only when it actually
+		// resolves as a user (slack-go's CtxChannel has no IsIM flag).
+		channelName := match.Channel.Name
+		isDM := strings.HasPrefix(match.Channel.ID, "D")
+		if userIDShapeRe.MatchString(channelName) {
+			if name, ok := resolveUser(channelName); ok && name != "" {
+				channelName = name
+				isDM = true
+			}
+		}
+
+		items = append(items, searchresults.Item{
+			ChannelID:   match.Channel.ID,
+			ChannelName: channelName,
+			UserName:    match.Username,
+			TS:          match.Timestamp,
+			ThreadTS:    threadTS,
+			Text:        messages.FlattenMrkdwn(match.Text, resolveUser, resolveChannel),
+			Timestamp:   formatSearchTimestamp(match.Timestamp, tsFormat, now),
+			IsDM:        isDM,
+		})
+	}
+	return items
+}
+
+// formatSearchTimestamp formats a search-result timestamp for the
+// modal's metadata line. Results span months, so non-today hits get a
+// date prefix: "May 19, 8:01 PM" this year, "May 19 2025, 8:01 PM" for
+// prior years. Today's hits show just the time (like Slack, and
+// mirroring the message pane's "Today" separator). Unparseable
+// timestamps fall back to the raw value, matching formatTimestamp.
+func formatSearchTimestamp(ts, timeFormat string, now time.Time) string {
+	parts := strings.SplitN(ts, ".", 2)
+	sec, err := strconv.ParseInt(parts[0], 10, 64)
+	if err != nil {
+		return ts
+	}
+	t := time.Unix(sec, 0)
+	ny, nm, nd := now.Date()
+	ty, tm, td := t.Date()
+	switch {
+	case ty == ny && tm == nm && td == nd:
+		return t.Format(timeFormat)
+	case ty == ny:
+		return t.Format("Jan 2, ") + t.Format(timeFormat)
+	default:
+		return t.Format("Jan 2 2006, ") + t.Format(timeFormat)
+	}
 }
 
 func formatTimestamp(ts, format string) string {
@@ -2835,6 +3151,21 @@ func bootstrapPresenceAndDND(ctx context.Context, wctx *WorkspaceContext, progra
 	}
 }
 
+// mostRecentlyVisitedChannel returns the channel ID with the latest
+// last-visited timestamp, or "" when there are no recorded visits (e.g.
+// the first run). Drives last-channel restoration on startup.
+func mostRecentlyVisitedChannel(visits map[string]int64) string {
+	var bestID string
+	var bestTS int64
+	for id, ts := range visits {
+		if ts > bestTS {
+			bestTS = ts
+			bestID = id
+		}
+	}
+	return bestID
+}
+
 // rtmEventHandler bridges WebSocket events into bubbletea messages via p.Send()
 // and caches all incoming messages to the SQLite database.
 type rtmEventHandler struct {
@@ -2868,7 +3199,17 @@ type rtmEventHandler struct {
 	backfillGate dedupeGate
 }
 
-func (h *rtmEventHandler) OnMessage(channelID, userID, ts, text, threadTS, subtype string, edited bool, files []slack.File, blocks slack.Blocks, attachments []slack.Attachment) {
+func (h *rtmEventHandler) OnMessage(channelID, userID, ts, text, threadTS, subtype string, edited bool, files []slack.File, blocks slack.Blocks, attachments []slack.Attachment, botID, username string) {
+	// Bot messages (bot_message) carry no user, only a bot_id + username.
+	// Key the row on the bot_id and resolve its avatar/name via bots.info,
+	// mirroring the fetch-path messageAuthor helper.
+	authorID := userID
+	if authorID == "" && botID != "" {
+		authorID = botID
+		if h.wsCtx != nil && h.wsCtx.UserResolver != nil {
+			h.wsCtx.UserResolver.RequestBot(botID, username)
+		}
+	}
 	// Cache every message to SQLite, regardless of active workspace.
 	// Guard against nil db so handlers constructed in tests (without
 	// real persistence) don't panic.
@@ -2876,7 +3217,7 @@ func (h *rtmEventHandler) OnMessage(channelID, userID, ts, text, threadTS, subty
 		synthetic := slack.Message{Msg: slack.Msg{
 			Type:            "message",
 			Timestamp:       ts,
-			User:            userID,
+			User:            authorID,
 			Text:            text,
 			ThreadTimestamp: threadTS,
 			SubType:         subtype,
@@ -2889,7 +3230,7 @@ func (h *rtmEventHandler) OnMessage(channelID, userID, ts, text, threadTS, subty
 			TS:          ts,
 			ChannelID:   channelID,
 			WorkspaceID: h.workspaceID,
-			UserID:      userID,
+			UserID:      authorID,
 			Text:        text,
 			ThreadTS:    threadTS,
 			Subtype:     subtype,
@@ -2930,10 +3271,16 @@ func (h *rtmEventHandler) OnMessage(channelID, userID, ts, text, threadTS, subty
 			IsDND:           h.wsCtx != nil && h.wsCtx.DNDEnabled && (h.wsCtx.DNDEndTS.IsZero() || time.Now().Before(h.wsCtx.DNDEndTS)),
 		}
 		chType := h.channelTypes[channelID]
+		// Pass the raw userID (not authorID): ShouldNotify's self-message
+		// suppression keys on the human sender, and a bot message
+		// (userID == "", authorID == botID) can never be "you" — so the
+		// empty userID is intentional, not a bug to "fix" later.
 		if notify.ShouldNotify(ctx, channelID, userID, text, chType) {
-			senderName := userID
-			if resolved, ok := h.userNames[userID]; ok {
+			senderName := authorID
+			if resolved, ok := h.userNames[authorID]; ok {
 				senderName = resolved
+			} else if username != "" {
+				senderName = username
 			}
 			chName := h.channelNames[channelID]
 			title := h.workspaceName + ": #" + chName
@@ -2992,11 +3339,17 @@ func (h *rtmEventHandler) OnMessage(channelID, userID, ts, text, threadTS, subty
 		return
 	}
 
-	userName, ok := resolveUserCached(userID, h.userNames, h.db)
+	userName, ok := resolveUserCached(authorID, h.userNames, h.db)
 	if !ok {
-		userName = userID
-		if h.wsCtx != nil && h.wsCtx.UserResolver != nil {
-			h.wsCtx.UserResolver.Request(userID)
+		userName = authorID
+		if userID != "" {
+			if h.wsCtx != nil && h.wsCtx.UserResolver != nil {
+				h.wsCtx.UserResolver.Request(userID)
+			}
+		} else if username != "" {
+			// Bot author: show its name immediately; bots.info (already
+			// requested above) fills in the avatar.
+			userName = username
 		}
 	}
 	debuglog.Cache("OnMessage: team=%s channel=%s ts=%s subtype=%q thread_ts=%s decision=dispatched_to_app",
@@ -3006,7 +3359,7 @@ func (h *rtmEventHandler) OnMessage(channelID, userID, ts, text, threadTS, subty
 			ChannelID: channelID,
 			Message: messages.MessageItem{
 				TS:                ts,
-				UserID:            userID,
+				UserID:            authorID,
 				UserName:          userName,
 				Text:              text,
 				Timestamp:         formatTimestamp(ts, h.tsFormat),

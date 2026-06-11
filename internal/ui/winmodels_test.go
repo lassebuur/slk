@@ -215,3 +215,27 @@ func TestWorkspaceSwitch_RebuildsModels(t *testing.T) {
 		t.Fatal("pointer invariant broken after workspace switch")
 	}
 }
+
+func TestFocusWindow_ClearsActiveSearchOnOldModel(t *testing.T) {
+	// In-channel search state (App match list + model highlights +
+	// statusbar segment) is focused-pane state; a window focus swap
+	// must clear it on the OUTGOING model, or n/N would step a match
+	// list belonging to a different pane and stale highlights would
+	// stay baked into the old window's render.
+	a, w1, _ := twoWindowApp(t)
+	a.search = &activeSearch{}
+	a.messagepane.SetSearchTerms([]string{"needle"})
+	a.statusbar.SetSearch("/needle  1/3")
+	old := a.messagepane
+	oldVer := old.Version()
+	_ = a.focusWindow(w1)
+	if a.search != nil {
+		t.Fatal("focus swap must clear the active search match list")
+	}
+	if old.Version() == oldVer {
+		t.Fatal("outgoing model's search highlights were not cleared (no version bump)")
+	}
+	if out := a.statusbar.View(200); strings.Contains(out, "/needle") {
+		t.Fatalf("statusbar search segment must clear on focus swap:\n%s", out)
+	}
+}

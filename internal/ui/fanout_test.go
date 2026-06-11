@@ -232,7 +232,9 @@ func TestFanout_OlderMessagesPrependIntoSiblingWindow(t *testing.T) {
 	_, _ = a.Update(MessagesLoadedMsg{ChannelID: "C1", Messages: []messages.MessageItem{
 		{TS: "5.0", UserID: "U1", UserName: "alice", Text: "baseline", Timestamp: "1:00 PM"},
 	}})
-	_, _ = a.Update(OlderMessagesLoadedMsg{ChannelID: "C1", Messages: testMessageItems(2)})
+	// AnchorTS must match the windows' oldest TS (post-merge contract:
+	// blocks anchored to a replaced buffer are dropped per window).
+	_, _ = a.Update(OlderMessagesLoadedMsg{ChannelID: "C1", AnchorTS: "5.0", Messages: testMessageItems(2)})
 	for _, w := range []wintree.LeafID{w1, w2} {
 		msgs := a.winModels[w].Messages()
 		if len(msgs) != 3 {

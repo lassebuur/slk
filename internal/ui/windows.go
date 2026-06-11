@@ -123,6 +123,11 @@ func (a *App) focusWindow(id wintree.LeafID) tea.Cmd {
 	if m == nil {
 		return nil // unknown window; invariant breach, ignore
 	}
+	// In-channel search is focused-pane state (App-level match list +
+	// model-level highlights). Clear it BEFORE the pointer swap so the
+	// outgoing model's highlights are removed; n/N against a different
+	// pane's match list would misnavigate.
+	a.clearActiveSearch()
 	a.focusedWin = id
 	a.messagepane = m
 	a.focusedPanel = PanelMessages

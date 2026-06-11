@@ -101,6 +101,9 @@ type Model struct {
 	vp                viewport.Model
 	reactionNavActive bool
 	reactionNavIndex  int
+	// currentUserID is the authenticated user; UpdateReaction uses it to
+	// set HasReacted only for the current user's own reactions.
+	currentUserID string
 
 	// Render cache -- pre-rendered reply entries (unbordered content
 	// captured per reply; borders are applied later when assembling
@@ -308,6 +311,11 @@ func (m *Model) SetThread(parent messages.MessageItem, replies []messages.Messag
 	} else {
 		m.selected = 0
 	}
+	// Force the next View() to re-snap the viewport to the new selection.
+	// Without this, opening a thread whose newest-reply index matches the
+	// previously-viewed thread's snapped selection skips the snap and leaves
+	// the viewport scrolled to the top. Mirrors messages.Model.SetMessages.
+	m.hasSnapped = false
 	m.InvalidateCache()
 }
 
@@ -579,6 +587,12 @@ func (m *Model) SetUserNames(names map[string]string) {
 	m.InvalidateCache()
 }
 
+// SetCurrentUser records the authenticated user ID so UpdateReaction can
+// flag the current user's own reactions (HasReacted) correctly.
+func (m *Model) SetCurrentUser(userID string) {
+	m.currentUserID = userID
+}
+
 // PatchUserName updates the in-memory userNames map (used for @mention
 // rendering) and overwrites the UserName field on the parent message
 // and every cached reply authored by userID. Always invalidates the
@@ -802,12 +816,23 @@ func (m *Model) UpdateReaction(messageTS, emojiName, userID string, remove bool)
 			if remove {
 				for j, r := range reply.Reactions {
 					if r.Emoji == emojiName {
+						// Idempotent: only decrement if userID was present.
+						newIDs := messages.RemoveUserID(r.UserIDs, userID)
+						if len(newIDs) == len(r.UserIDs) && r.Count <= len(r.UserIDs) {
+							// Duplicate echo of an already-applied removal
+							// (un-listed reactor, non-truncated list) — skip.
+							// When Count > len(UserIDs) the list is truncated,
+							// so the removal is real; fall through to decrement.
+							break
+						}
+						r.UserIDs = newIDs
 						r.Count--
-						r.UserIDs = messages.RemoveUserID(r.UserIDs, userID)
+						if userID == m.currentUserID {
+							r.HasReacted = false
+						}
 						if r.Count <= 0 {
 							m.replies[i].Reactions = append(reply.Reactions[:j], reply.Reactions[j+1:]...)
 						} else {
-							r.HasReacted = false
 							m.replies[i].Reactions[j] = r
 						}
 						break
@@ -817,9 +842,16 @@ func (m *Model) UpdateReaction(messageTS, emojiName, userID string, remove bool)
 				found := false
 				for j, r := range reply.Reactions {
 					if r.Emoji == emojiName {
-						r.Count++
-						r.HasReacted = true
-						r.UserIDs = messages.AppendUserID(r.UserIDs, userID)
+						// Idempotent: only increment if userID is newly added,
+						// so an optimistic update + its WS echo don't double-count.
+						newIDs := messages.AppendUserID(r.UserIDs, userID)
+						if len(newIDs) != len(r.UserIDs) {
+							r.UserIDs = newIDs
+							r.Count++
+						}
+						if userID == m.currentUserID {
+							r.HasReacted = true
+						}
 						m.replies[i].Reactions[j] = r
 						found = true
 						break
@@ -829,7 +861,7 @@ func (m *Model) UpdateReaction(messageTS, emojiName, userID string, remove bool)
 					m.replies[i].Reactions = append(m.replies[i].Reactions, messages.ReactionItem{
 						Emoji:      emojiName,
 						Count:      1,
-						HasReacted: true,
+						HasReacted: userID == m.currentUserID,
 						UserIDs:    messages.AppendUserID(nil, userID),
 					})
 				}

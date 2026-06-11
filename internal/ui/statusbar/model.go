@@ -27,13 +27,14 @@ type Model struct {
 	unreadCount int
 	connState   ConnectionState
 	inThread    bool
-	toast       string    // "" == no toast; otherwise rendered verbatim in the right slot
-	presence    string    // "active", "away", or "" (unknown — segment hidden)
+	toast       string // "" == no toast; otherwise rendered verbatim in the right slot
+	presence    string // "active", "away", or "" (unknown — segment hidden)
 	dndEnabled  bool
 	dndEndTS    time.Time // zero if not in DND
 	syncing     bool      // true while a background cache-verify fetch is in flight
 	helpHint    string    // muted text rendered in the gap area; empty disables
 	commandLine string    // "" == inactive; otherwise the :prompt shown in place of channel/workspace
+	search      string    // search segment ("/query  3/17" indicator / live prompt); "" hides
 	version     int64
 }
 
@@ -140,6 +141,27 @@ func (m *Model) SetSyncing(syncing bool) {
 	m.dirty()
 }
 
+// Search returns the current search segment text ("" when hidden).
+func (m *Model) Search() string { return m.search }
+
+// maxSearchWidth caps the search segment so a long query can't push
+// the bar's left half past the available width and wrap the line.
+const maxSearchWidth = 40
+
+// SetSearch sets the search segment rendered after the workspace name
+// (the `/query  3/17` indicator and live `/` prompt). "" hides it.
+// Text longer than maxSearchWidth runes is elided with a trailing "…"
+// (the segment is plain unstyled text, so a rune slice is safe).
+func (m *Model) SetSearch(s string) {
+	if r := []rune(s); len(r) > maxSearchWidth {
+		s = string(r[:maxSearchWidth-1]) + "…"
+	}
+	if m.search != s {
+		m.search = s
+		m.dirty()
+	}
+}
+
 // SetHelpHint sets a muted hint string rendered in the unused space between
 // the left segments and the right pills. Pass "" to clear. The hint is
 // dropped silently when the bar lacks room for it plus 4 columns of padding.
@@ -214,6 +236,12 @@ func (m Model) View(width int) string {
 	// Workspace
 	wsInfo := styles.StatusBar.Render(fmt.Sprintf(" %s ", m.workspace))
 
+	// Search prompt / match indicator
+	searchInfo := ""
+	if m.search != "" {
+		searchInfo = styles.StatusBar.Render(" " + m.search + " ")
+	}
+
 	// Right side: unread + connection
 	var rightParts []string
 
@@ -264,12 +292,14 @@ func (m Model) View(width int) string {
 			lipgloss.NewStyle().Foreground(styles.Error).Background(styles.SurfaceDark).Render("● Disconnected"))
 	}
 
+	// The :command prompt owns the left side while active (the
+	// channel/workspace/search segments return when it clears).
 	var left string
 	if m.commandLine != "" {
 		cmdInfo := styles.StatusBar.Render(fmt.Sprintf(" %s▌ ", m.commandLine))
 		left = lipgloss.JoinHorizontal(lipgloss.Center, modeLabel, cmdInfo)
 	} else {
-		left = lipgloss.JoinHorizontal(lipgloss.Center, modeLabel, channelInfo, wsInfo)
+		left = lipgloss.JoinHorizontal(lipgloss.Center, modeLabel, channelInfo, wsInfo, searchInfo)
 	}
 
 	// Render separators and trailing padding with the SurfaceDark background so
@@ -354,6 +384,11 @@ func formatDND(endTS time.Time) string {
 type CopiedMsg struct {
 	N int
 }
+
+// CopyFailedMsg is delivered when a mouse-selection copy operation fails
+// (e.g. because the system clipboard driver is unavailable). App handles
+// it by setting the toast to "Failed to copy selection" and scheduling a CopiedClearMsg.
+type CopyFailedMsg struct{}
 
 // CopiedClearMsg is the follow-up tick that clears the toast.
 type CopiedClearMsg struct{}

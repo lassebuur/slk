@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -231,6 +232,10 @@ type Model struct {
 	userNames    map[string]string // user ID -> display name for mention resolution
 	channelNames map[string]string // channel ID -> name for bare <#CID> resolution
 
+	// searchTerms are folded word-prefix terms of the active in-channel
+	// search; non-empty enables highlight rendering. nil = no search.
+	searchTerms []string
+
 	// Render cache -- invalidated when messages or width change.
 	// Each entry holds pre-bordered variants so selection movement does not
 	// re-invoke lipgloss per keypress.
@@ -277,6 +282,11 @@ type Model struct {
 
 	reactionNavActive bool
 	reactionNavIndex  int
+
+	// currentUserID is the authenticated user; UpdateReaction uses it to
+	// set ReactionItem.HasReacted only for the current user's own
+	// reactions (not other users'). Empty until SetCurrentUser is called.
+	currentUserID string
 
 	lastReadTS string
 
@@ -621,6 +631,20 @@ func channelGlyph(chType string) string {
 	default:
 		return "#"
 	}
+}
+
+// SetSearchTerms sets (or clears, with nil) the folded terms whose
+// word-prefix occurrences get highlighted in message text. Invalidates
+// the render cache.
+func (m *Model) SetSearchTerms(terms []string) {
+	// Redundant calls (same terms) must not thrash the render cache;
+	// clone so a caller mutating its slice can't alias our state.
+	if slices.Equal(terms, m.searchTerms) {
+		return
+	}
+	m.searchTerms = slices.Clone(terms)
+	m.InvalidateCache()
+	m.dirty()
 }
 
 func (m *Model) SetMessages(msgs []MessageItem) {
@@ -1172,12 +1196,26 @@ func (m *Model) UpdateReaction(messageTS, emojiName, userID string, remove bool)
 			if remove {
 				for j, r := range msg.Reactions {
 					if r.Emoji == emojiName {
+						// Idempotent: only decrement if userID was actually
+						// present (a duplicate WS echo must not under-count).
+						newIDs := RemoveUserID(r.UserIDs, userID)
+						if len(newIDs) == len(r.UserIDs) && r.Count <= len(r.UserIDs) {
+							// userID isn't among the listed reactors and the
+							// list isn't truncated, so this is a duplicate echo
+							// of a removal we already applied — skip to avoid
+							// under-counting. When Count > len(UserIDs), Slack
+							// truncated the reactor list for a popular reaction;
+							// the removal is real, so fall through and decrement.
+							break
+						}
+						r.UserIDs = newIDs
 						r.Count--
-						r.UserIDs = RemoveUserID(r.UserIDs, userID)
+						if userID == m.currentUserID {
+							r.HasReacted = false
+						}
 						if r.Count <= 0 {
 							m.messages[i].Reactions = append(msg.Reactions[:j], msg.Reactions[j+1:]...)
 						} else {
-							r.HasReacted = false
 							m.messages[i].Reactions[j] = r
 						}
 						break
@@ -1187,9 +1225,17 @@ func (m *Model) UpdateReaction(messageTS, emojiName, userID string, remove bool)
 				found := false
 				for j, r := range msg.Reactions {
 					if r.Emoji == emojiName {
-						r.Count++
-						r.HasReacted = true
-						r.UserIDs = AppendUserID(r.UserIDs, userID)
+						// Idempotent: only increment if userID is newly
+						// added, so our own optimistic update + the WS echo
+						// of the same reaction don't double-count.
+						newIDs := AppendUserID(r.UserIDs, userID)
+						if len(newIDs) != len(r.UserIDs) {
+							r.UserIDs = newIDs
+							r.Count++
+						}
+						if userID == m.currentUserID {
+							r.HasReacted = true
+						}
 						m.messages[i].Reactions[j] = r
 						found = true
 						break
@@ -1199,7 +1245,7 @@ func (m *Model) UpdateReaction(messageTS, emojiName, userID string, remove bool)
 					m.messages[i].Reactions = append(m.messages[i].Reactions, ReactionItem{
 						Emoji:      emojiName,
 						Count:      1,
-						HasReacted: true,
+						HasReacted: userID == m.currentUserID,
 						UserIDs:    AppendUserID(nil, userID),
 					})
 				}
@@ -1272,6 +1318,12 @@ func (m *Model) SetUserNames(names map[string]string) {
 	m.userNames = names
 	m.cache = nil // invalidate cache so mentions re-render
 	m.dirty()
+}
+
+// SetCurrentUser records the authenticated user ID so UpdateReaction can
+// flag the current user's own reactions (HasReacted) correctly.
+func (m *Model) SetCurrentUser(userID string) {
+	m.currentUserID = userID
 }
 
 // PatchUserName updates the in-memory userNames map (used for @mention
@@ -1867,7 +1919,17 @@ func (m *Model) renderMessagePlain(msg MessageItem, width int, avatarStr string,
 		Customs:      m.emojiCtx.Customs,
 		EmojiFlushes: &flushes,
 	}
-	text := styles.MessageText.Render(WordWrap(RenderSlackMarkdownWith(MessageTextSource(msg), bodyOpts), contentWidth))
+	rendered := RenderSlackMarkdownWith(MessageTextSource(msg), bodyOpts)
+	if len(m.searchTerms) > 0 {
+		// SearchHighlightSGR's close sequence restores the theme bg/fg
+		// after the highlight's reset so plain body text doesn't bleed
+		// terminal-default colors. One derivation per renderMessagePlain
+		// call (i.e. per cache miss), not per line.
+		if hlStart, hlEnd, ok := SearchHighlightSGR(); ok {
+			rendered = HighlightSearchTerms(rendered, m.searchTerms, hlStart, hlEnd)
+		}
+	}
+	text := styles.MessageText.Render(WordWrap(rendered, contentWidth))
 	if stats != nil {
 		stats.bodyTotal += time.Since(bodyT0)
 	}
