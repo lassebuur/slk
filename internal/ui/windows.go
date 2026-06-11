@@ -3,9 +3,9 @@
 // App-side window management (window-management design §1, §4).
 // Thin bridge between the wintree package and App state: tree ops,
 // focus movement, status-bar toasts, and the focused-window channel
-// contract. Phase 2: ONE live messages model — the focused window
-// renders it; focusing a window on a different channel re-dispatches
-// the standard ChannelSelectedMsg so the live pane follows focus.
+// contract. Phase 3: every window owns a live messages model (see
+// internal/ui/winmodels.go); focus changes are a pointer swap plus
+// an active-channel context retarget — no channel re-dispatch.
 package ui
 
 import (
@@ -13,6 +13,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/gammons/slk/internal/ui/messages"
 	"github.com/gammons/slk/internal/ui/wintree"
 )
 
@@ -53,13 +54,29 @@ func (a *App) windowBounds() wintree.Rect {
 }
 
 // splitWindow creates a new window (cloning the focused window's
-// channel) and focuses it. Toasts "Not enough room" on refusal.
+// channel) and focuses it. The new window gets its own model, seeded
+// from the source so the clone shows the same history immediately.
+// Toasts "Not enough room" on refusal.
 func (a *App) splitWindow(dir wintree.Dir) tea.Cmd {
+	src := a.messagepane
+	srcCh, _ := a.wins.Channel(a.focusedWin)
 	id, err := a.wins.Split(a.focusedWin, dir, a.windowBounds())
 	if err != nil {
 		return toastWithClear(a, "Not enough room", 2*time.Second)
 	}
+	m := a.newWindowModel(srcCh.Name)
+	m.SetChannel(srcCh.Name, "")
+	m.SetChannelType(srcCh.Type)
+	if src != nil {
+		// Messages() exposes the source's internal slice; copy so the
+		// two models never alias one backing array (in-place edits
+		// like SwapLocalSent would otherwise leak across windows).
+		m.SetMessages(append([]messages.MessageItem(nil), src.Messages()...))
+		m.SetLastReadTS(src.LastReadTS())
+	}
+	a.winModels[id] = m
 	a.focusedWin = id
+	a.messagepane = m
 	a.focusedPanel = PanelMessages
 	return nil
 }
@@ -71,12 +88,14 @@ func (a *App) closeWindow() tea.Cmd {
 	if err != nil {
 		return toastWithClear(a, "Cannot close last window", 2*time.Second)
 	}
+	a.syncWinModels()
 	return a.focusWindow(next)
 }
 
 // onlyWindow closes every window except the focused one.
 func (a *App) onlyWindow() {
 	_ = a.wins.Only(a.focusedWin)
+	a.syncWinModels()
 }
 
 // cycleWindow focuses the next window in tree order (ctrl+w w).
@@ -93,23 +112,27 @@ func (a *App) navigateWindow(nd wintree.NavDir) tea.Cmd {
 	return nil
 }
 
-// focusWindow moves window focus to id. When the target window views
-// a different channel than the live model, the standard channel
-// selection is dispatched so the live pane loads it (Phase 2 single-
-// model semantics; Phase 3 replaces this with per-window models).
+// focusWindow moves window focus to id: a pointer swap plus an
+// active-channel context retarget (compose, statusbar, typing,
+// activeChannelID). Per-window models mean no channel re-dispatch.
 func (a *App) focusWindow(id wintree.LeafID) tea.Cmd {
 	if id == a.focusedWin {
 		return nil
 	}
+	m := a.winModels[id]
+	if m == nil {
+		return nil // unknown window; invariant breach, ignore
+	}
 	a.focusedWin = id
+	a.messagepane = m
 	a.focusedPanel = PanelMessages
-	ch, ok := a.wins.Channel(id)
-	if !ok || ch.ID == "" || ch.ID == a.activeChannelID {
-		return nil
+	if a.threadVisible {
+		a.CloseThread() // spec §7: thread follows focused window
 	}
-	return func() tea.Msg {
-		return ChannelSelectedMsg{ID: ch.ID, Name: ch.Name, Type: ch.Type}
+	if ch, ok := a.wins.Channel(id); ok && ch.ID != "" && ch.ID != a.activeChannelID {
+		a.retargetActiveChannel(ch.ID, ch.Name, ch.Type)
 	}
+	return nil
 }
 
 // setFocusedWindowChannel records the applied channel selection on

@@ -88,7 +88,7 @@ type App struct {
 	// Sub-models
 	workspaceRail    workspace.Model
 	sidebar          sidebar.Model
-	messagepane      messages.Model
+	messagepane      *messages.Model
 	compose          compose.Model
 	statusbar        statusbar.Model
 	channelFinder    channelfinder.Model
@@ -122,6 +122,12 @@ type App struct {
 	// unfocused windows render placeholders.
 	wins       *wintree.Tree
 	focusedWin wintree.LeafID
+
+	// winModels holds one live messages.Model per window (Phase 3).
+	// INVARIANT: messagepane == winModels[focusedWin] always; keys
+	// exactly match wins.Leaves(). Maintained by newWindowModel /
+	// focusWindow / closeWindow / onlyWindow / resetWindowTree.
+	winModels map[wintree.LeafID]*messages.Model
 
 	// pendingWinCmd is true between a ctrl+w press and its chord key
 	// (vim window-command prefix). Esc or an unmapped key cancels;
@@ -184,6 +190,16 @@ type App struct {
 	// thread panel parent's UserName without round-tripping through any
 	// sub-component's API.
 	userNames map[string]string
+
+	// Per-window model config retention (Phase 3): the most recent
+	// values pushed through the App-level Set* forwarders, kept so
+	// newWindowModel can configure late-created window models
+	// identically to the root model. See internal/ui/winmodels.go.
+	avatarFn     messages.AvatarFunc
+	imageCtx     imgrender.ImageContext
+	emojiCtx     messages.EmojiContext
+	emojiCustoms map[string]string
+	channelNames map[string]string
 
 	// externalUsers tracks which user IDs are Slack Connect / shared-channel
 	// guests. Populated by main.go via SetExternalUsers as users are
@@ -401,7 +417,6 @@ func NewApp() *App {
 	app := &App{
 		workspaceRail:        workspace.New(nil, 0),
 		sidebar:              sidebar.New(nil),
-		messagepane:          messages.New(nil, ""),
 		compose:              compose.New(""),
 		statusbar:            statusbar.New(),
 		channelFinder:        channelfinder.New(),
@@ -446,6 +461,9 @@ func NewApp() *App {
 		navHistory:           newNavHistoryStore(),
 		clipboardRead:        defaultClipboardReader,
 	}
+	rootModel := messages.New(nil, "")
+	app.winModels = map[wintree.LeafID]*messages.Model{rootWin: &rootModel}
+	app.messagepane = app.winModels[rootWin]
 	app.editing = newEditController()
 	// typing tracker is referenced by typingOut so it must exist first;
 	// construct outside the literal because struct literals can't
@@ -1741,6 +1759,7 @@ func (a *App) SetChannels(items []sidebar.ChannelItem) {
 	}
 	a.compose.SetChannels(picks)
 	a.threadCompose.SetChannels(picks)
+	a.channelNames = names
 	a.messagepane.SetChannelNames(names)
 	a.threadPanel.SetChannelNames(names)
 	a.threadsView.SetChannelNames(names)
@@ -1820,6 +1839,7 @@ func (a *App) SetChannelFinderItems(items []channelfinder.Item) {
 
 // SetAvatarFunc sets the function used to get rendered avatars for messages.
 func (a *App) SetAvatarFunc(fn messages.AvatarFunc) {
+	a.avatarFn = fn
 	a.messagepane.SetAvatarFunc(fn)
 	a.threadPanel.SetAvatarFunc(fn)
 }
@@ -1828,6 +1848,7 @@ func (a *App) SetAvatarFunc(fn messages.AvatarFunc) {
 // messages pane. Should be called once at startup, before the first
 // View(). Pass a zero-valued ImageContext to disable inline rendering.
 func (a *App) SetImageContext(ctx imgrender.ImageContext) {
+	a.imageCtx = ctx
 	a.messagepane.SetImageContext(ctx)
 	a.threadPanel.SetImageContext(ctx)
 }
@@ -1840,6 +1861,7 @@ func (a *App) SetImageContext(ctx imgrender.ImageContext) {
 //
 // Phase 8 extends this to the picker; Phase 9 to autocomplete.
 func (a *App) SetEmojiContext(ctx messages.EmojiContext) {
+	a.emojiCtx = ctx
 	a.messagepane.SetEmojiContext(ctx)
 	a.threadPanel.SetEmojiContext(thread.EmojiContext{
 		PlaceCtx: ctx.PlaceCtx,
@@ -2195,6 +2217,7 @@ func (a *App) SetCustomEmoji(customs map[string]string) {
 	}
 	// Update all panes' emoji-image context so newly-known custom
 	// emoji URLs become resolvable on the next render.
+	a.emojiCustoms = customs
 	a.messagepane.SetEmojiCustoms(customs)
 	a.threadPanel.SetEmojiCustoms(customs)
 	a.reactionPicker.SetEmojiCustoms(customs)

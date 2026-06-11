@@ -185,6 +185,38 @@ var reduceChannels reducerFunc = func(a *App, msg tea.Msg) (tea.Cmd, bool) {
 	return nil, false
 }
 
+// retargetActiveChannel points the App's active-channel context
+// (activeChannelID, typing throttle, compose targets, statusbar) at
+// the given channel and fires the async membership fetch. Factored
+// out of reduceChannelSelected so window-focus changes — which swap
+// per-window models without re-running channel selection (Phase 3)
+// — can reuse it. Selection-only semantics (nav-history push,
+// RecordVisit, thread close, tiered cache load, mark-read) stay in
+// the reducer.
+func (a *App) retargetActiveChannel(id, name, chType string) {
+	a.activeChannelID = id
+	a.typingOut.ResetThrottle() // reset typing throttle for new channel
+	a.compose.SetChannel(name)
+	a.compose.SetActiveChannel(id)
+	a.threadCompose.SetActiveChannel(id)
+	// Fire the membership fetcher on a fresh goroutine so it can't
+	// block the Update loop. Fire-and-forget -- results arrive
+	// later via ChannelMembershipMsg. main.go's MembershipFetch
+	// closure ultimately calls Membership.EnsureFresh which invokes
+	// bubbletea Program.Send via pushSnapshot, and bubbletea v2's
+	// program channel is unbuffered: a Send from inside Update
+	// would deadlock waiting for the same goroutine to receive.
+	// See manager.go's EnsureFresh docs and the deadlock-regression
+	// test in app_test.go.
+	{
+		channels := a.channels
+		channelID := ids.ChannelID(id)
+		go channels.MembershipFetch(channelID)
+	}
+	a.statusbar.SetChannel(name)
+	a.statusbar.SetChannelType(chType)
+}
+
 // reduceChannelSelected handles ChannelSelectedMsg. Extracted from
 // the reduceChannels dispatch switch because the arm is ~120 lines
 // with three tiered cache-freshness branches.
@@ -226,8 +258,6 @@ func reduceChannelSelected(a *App, m ChannelSelectedMsg) (tea.Cmd, bool) {
 	// j/k through messages, react, open threads, etc. without first
 	// having to Tab/h-l out of the sidebar after picking a channel.
 	a.focusedPanel = PanelMessages
-	a.activeChannelID = m.ID
-	a.typingOut.ResetThrottle() // reset typing throttle for new channel
 	// Update local finder ordering immediately so the next Ctrl+T
 	// sees this channel at the top of the recents.
 	now := time.Now().Unix()
@@ -252,27 +282,9 @@ func reduceChannelSelected(a *App, m ChannelSelectedMsg) (tea.Cmd, bool) {
 	a.compose.CloseMention()
 	a.threadCompose.CloseMention()
 
-	a.compose.SetChannel(m.Name)
-	a.compose.SetActiveChannel(m.ID)
-	a.threadCompose.SetActiveChannel(m.ID)
-	// Fire the membership fetcher on a fresh goroutine so it can't
-	// block the Update loop. Fire-and-forget -- results arrive
-	// later via ChannelMembershipMsg. main.go's MembershipFetch
-	// closure ultimately calls Membership.EnsureFresh which invokes
-	// bubbletea Program.Send via pushSnapshot, and bubbletea v2's
-	// program channel is unbuffered: a Send from inside Update
-	// would deadlock waiting for the same goroutine to receive.
-	// See manager.go's EnsureFresh docs and the deadlock-regression
-	// test in app_test.go.
-	{
-		channels := a.channels
-		channelID := ids.ChannelID(m.ID)
-		go channels.MembershipFetch(channelID)
-	}
-	a.statusbar.SetChannel(m.Name)
-	a.statusbar.SetChannelType(m.Type)
+	a.retargetActiveChannel(m.ID, m.Name, m.Type)
 	// Record the applied selection on the focused window so window
-	// focus changes can re-dispatch it (see internal/ui/windows.go).
+	// focus changes can retarget to it (see internal/ui/windows.go).
 	a.setFocusedWindowChannel(m.ID, m.Name, m.Type)
 
 	cached := a.channels.ReadCache(ids.ChannelID(m.ID))

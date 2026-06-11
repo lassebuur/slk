@@ -61,7 +61,6 @@ import (
 
 	"github.com/gammons/slk/internal/ids"
 	"github.com/gammons/slk/internal/ui/styles"
-	"github.com/gammons/slk/internal/ui/wintree"
 )
 
 var reduceWorkspace reducerFunc = func(a *App, msg tea.Msg) (tea.Cmd, bool) {
@@ -252,18 +251,17 @@ func reduceWorkspaceSwitched(a *App, m WorkspaceSwitchedMsg) tea.Cmd {
 	a.lastOpenedThreadTS = ""
 	a.CloseThread()
 	a.clearSelections()
-	// Window tree is per-workspace state in Phase 2: collapse to a
-	// single empty window so no leaf carries a cross-workspace channel.
-	// The queued ChannelSelectedMsg for this workspace re-populates it.
-	wins, rootWin := wintree.New(wintree.Channel{})
-	a.wins = wins
-	a.focusedWin = rootWin
+	// The window tree + per-window models are per-workspace state:
+	// collapse to a single empty window so no leaf carries a
+	// cross-workspace channel. The queued ChannelSelectedMsg for
+	// this workspace re-populates it.
+	a.resetWindowTree()
 	a.compose.Reset()
 	a.statusbar.SetSyncing(false) // defensive: don't carry stale sync state across workspaces
-	// Pane is left as-is -- the queued ChannelSelectedMsg below
-	// will paint over it via the three-tier dispatch (Task 10).
-	// For empty workspaces (no Channels) the pane is cleared
-	// explicitly in the else branch below.
+	// resetWindowTree replaced the pane with a fresh empty model;
+	// the queued ChannelSelectedMsg below paints it via the
+	// three-tier dispatch. For empty workspaces (no Channels) the
+	// pane's empty state is confirmed in the else branch below.
 	a.SetMode(ModeNormal)
 	a.compose.Blur()
 	a.sidebar.SetSectionsProvider(m.SectionsProvider)

@@ -71,26 +71,6 @@ func TestCloseWindow_FocusFallsToNeighbor(t *testing.T) {
 	}
 }
 
-func TestFocusWindow_DifferentChannelDispatchesSelection(t *testing.T) {
-	a := newWideTestApp(t)
-	// Window 1 views C1.
-	_, _ = a.Update(ChannelSelectedMsg{ID: "C1", Name: "general", Type: "channel"})
-	first := a.focusedWin
-	// Split (clone C1), then switch the new focused window to C2.
-	_ = a.splitWindow(wintree.SplitSideBySide)
-	_, _ = a.Update(ChannelSelectedMsg{ID: "C2", Name: "ops", Type: "channel"})
-	// Focus back to window 1: its channel (C1) differs from live (C2),
-	// so a ChannelSelectedMsg cmd must be returned.
-	cmd := a.focusWindow(first)
-	if cmd == nil {
-		t.Fatal("expected channel-selection cmd")
-	}
-	msg, ok := cmd().(ChannelSelectedMsg)
-	if !ok || msg.ID != "C1" || msg.Name != "general" {
-		t.Fatalf("cmd produced %+v, want ChannelSelectedMsg for C1", msg)
-	}
-}
-
 func TestChannelSelected_UpdatesFocusedWindowChannel(t *testing.T) {
 	a := newWideTestApp(t)
 	_, _ = a.Update(ChannelSelectedMsg{ID: "C9", Name: "incidents", Type: "channel"})
